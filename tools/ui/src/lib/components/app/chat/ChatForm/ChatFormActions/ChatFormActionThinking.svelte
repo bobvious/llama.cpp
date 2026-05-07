@@ -1,5 +1,4 @@
 <script lang="ts">
-	import { Brain, BrainCircuit } from '@lucide/svelte';
 	import { Button } from '$lib/components/ui/button';
 	import * as Tooltip from '$lib/components/ui/tooltip';
 	import { config, settingsStore } from '$lib/stores/settings.svelte';
@@ -26,20 +25,12 @@
 			<Button
 				type="button"
 				variant={enableThinking ? 'default' : 'outline'}
-				class="h-8 w-8 rounded-full p-0"
+				class="h-8 rounded-full px-3 text-xs font-medium"
 				{disabled}
 				onclick={toggleThinking}
 				aria-pressed={enableThinking}
 			>
-				<span class="sr-only">
-					{enableThinking ? 'Thinking enabled' : 'Thinking disabled'}
-				</span>
-
-				{#if enableThinking}
-					<BrainCircuit class="h-4 w-4" />
-				{:else}
-					<Brain class="h-4 w-4 opacity-60" />
-				{/if}
+				Think
 			</Button>
 		</Tooltip.Trigger>
 
