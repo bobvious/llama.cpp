@@ -52,6 +52,7 @@ import type {
 	DatabaseMessageExtra
 } from '$lib/types';
 import { ErrorDialogType, MessageRole, MessageType } from '$lib/enums';
+import { interpolateSystemPrompt } from '$lib/utils/system-prompt-vars';
 
 interface ConversationStateEntry {
 	lastAccessed: number;
@@ -555,7 +556,16 @@ class ChatStore {
 			if (isNewConversation) {
 				const rootId = await DatabaseService.createRootMessage(currentConv.id);
 				const currentConfig = config();
-				const systemPrompt = currentConfig.systemMessage?.toString().trim();
+				const rawSystemPrompt = currentConfig.systemMessage?.toString().trim();
+				// Interpolate {{CURRENT_DATE}} / {{CURRENT_DATETIME}} / {{CURRENT_WEEKDAY}} /
+				// {{ISO_DATETIME}} / {{TZ}} / {{MODEL}} ONCE at conversation creation, so the
+				// stored value is stable for the conversation's lifetime — preserves llama-server
+				// KV cache prefix-match across turns. New conversation = fresh values.
+				const systemPrompt = rawSystemPrompt
+					? interpolateSystemPrompt(rawSystemPrompt, {
+							model: isRouterMode() ? selectedModelName() ?? undefined : undefined
+						})
+					: rawSystemPrompt;
 				if (systemPrompt) {
 					const systemMessage = await DatabaseService.createSystemMessage(
 						currentConv.id,
