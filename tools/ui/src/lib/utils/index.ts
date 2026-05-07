@@ -190,3 +190,6 @@ export { uuid } from './uuid';
 
 // CSS utilities
 export { remToPx } from './css';
+
+// System-prompt template variable interpolation (Infinity fork)
+export { interpolateSystemPrompt } from './system-prompt-vars';
