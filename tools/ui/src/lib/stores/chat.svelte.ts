@@ -1752,6 +1752,11 @@ class ChatStore {
 
 		if (currentConfig.systemMessage) apiOptions.systemMessage = currentConfig.systemMessage;
 
+		// Send enable_thinking only when off — model defaults to thinking-on for
+		// reasoning-capable templates, so omit the kwarg in the on case to avoid
+		// noise on non-Qwen3 templates that don't recognize it.
+		if (currentConfig.enableThinking === false) apiOptions.enableThinking = false;
+
 		if (currentConfig.disableReasoningParsing) apiOptions.disableReasoningParsing = true;
 
 		if (currentConfig.excludeReasoningFromContext) apiOptions.excludeReasoningFromContext = true;

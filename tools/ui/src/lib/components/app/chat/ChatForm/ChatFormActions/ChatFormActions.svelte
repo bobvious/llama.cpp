@@ -5,7 +5,8 @@
 		ChatFormActionsAdd,
 		ChatFormActionModels,
 		ChatFormActionRecord,
-		ChatFormActionSubmit
+		ChatFormActionSubmit,
+		ChatFormActionThinking
 	} from '$lib/components/app';
 	import { FileTypeCategory } from '$lib/enums';
 	import { mcpStore } from '$lib/stores/mcp.svelte';
@@ -122,6 +123,8 @@
 			useGlobalSelection
 		/>
 	{/if}
+
+	<ChatFormActionThinking {disabled} />
 
 	{#if isLoading && !canSubmit}
 		<Button

@@ -61,6 +61,8 @@ export interface SettingsChatServiceOptions {
 	model?: string;
 	// System message to inject
 	systemMessage?: string;
+	// Send chat_template_kwargs.enable_thinking — toggle the model's reasoning phase
+	enableThinking?: boolean;
 	// Disable reasoning parsing (use 'none' instead of 'auto')
 	disableReasoningParsing?: boolean;
 	// Strip reasoning content from context before sending

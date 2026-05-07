@@ -246,6 +246,8 @@ export interface ApiChatCompletionRequest {
 	// Sampler configuration
 	samplers?: string[];
 	backend_sampling?: boolean;
+	// Chat template kwargs (e.g. enable_thinking for Qwen3)
+	chat_template_kwargs?: Record<string, unknown>;
 	// Custom parameters (JSON string)
 	custom?: Record<string, unknown>;
 	timings_per_token?: boolean;
