@@ -152,10 +152,9 @@
 			return showToolCallInProgress;
 		}
 
-		if (section.type === AgenticSectionType.REASONING_PENDING) {
-			return showThoughtInProgress;
-		}
-
+		// Reasoning panes (both streaming and completed) start CLOSED.
+		// Per MrO directive 2026-05-07: "leave the reasoning detail closed
+		// unless deliberately opened." Click to expand, click again to close.
 		return false;
 	}
 
