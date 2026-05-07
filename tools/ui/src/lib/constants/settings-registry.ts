@@ -627,6 +627,14 @@ const SETTINGS_REGISTRY: Record<string, SettingsSectionEntry> = {
 				section: SETTINGS_SECTION_SLUGS.DEVELOPER
 			},
 			{
+				key: SETTINGS_KEYS.ENABLE_THINKING,
+				label: 'Enable thinking (chat_template_kwargs)',
+				help: 'Send chat_template_kwargs.enable_thinking with each request. With --reasoning off on the server, sending true triggers Qwen3 to split thinking into reasoning_content so the UI thinking pane works. Toggleable per-request from the chat-form "Think" pill.',
+				defaultValue: true,
+				type: SettingsFieldType.CHECKBOX,
+				section: SETTINGS_SECTION_SLUGS.DEVELOPER
+			},
+			{
 				key: SETTINGS_KEYS.DISABLE_REASONING_PARSING,
 				label: 'Disable reasoning content parsing',
 				help: 'Send reasoning_format=none so the server returns thinking tokens inline instead of extracting them into a separate field.',

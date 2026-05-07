@@ -177,6 +177,13 @@ export { default as ChatFormActionsAdd } from './ChatForm/ChatFormActions/ChatFo
 export { default as ChatFormActionRecord } from './ChatForm/ChatFormActions/ChatFormActionRecord.svelte';
 
 /**
+ * Toggle button for chat_template_kwargs.enable_thinking. Persists to settings.
+ * Default ON; when OFF the model skips its internal thinking phase entirely
+ * (Qwen3 etc.). Shows BrainCircuit when enabled, faded Brain when disabled.
+ */
+export { default as ChatFormActionThinking } from './ChatForm/ChatFormActions/ChatFormActionThinking.svelte';
+
+/**
  * Container for chat form action buttons. Arranges file attachment, audio record,
  * and submit/stop buttons in a horizontal layout. Handles conditional visibility
  * based on model capabilities and loading state.

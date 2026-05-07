@@ -155,6 +155,7 @@ export class ChatService {
 			custom,
 			timings_per_token,
 			// Config options
+			enableThinking,
 			disableReasoningParsing,
 			excludeReasoningFromContext,
 			continueFinalMessage
@@ -241,6 +242,13 @@ export class ChatService {
 		if (continueFinalMessage) {
 			requestBody.continue_final_message = true;
 			requestBody.add_generation_prompt = false;
+		}
+
+		if (enableThinking !== undefined) {
+			requestBody.chat_template_kwargs = {
+				...(requestBody.chat_template_kwargs ?? {}),
+				enable_thinking: enableThinking
+			};
 		}
 
 		if (temperature !== undefined) requestBody.temperature = temperature;
