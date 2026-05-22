@@ -190,15 +190,18 @@ class MCPStore {
 
 	/**
 	 * Checks if a server is enabled for a given chat.
-	 * Only per-chat overrides (persisted in localStorage for new chats,
-	 * or in IndexedDB for existing conversations) control enabled state.
+	 * A per-chat override (persisted in localStorage for new chats, or in
+	 * IndexedDB for existing conversations) wins when present. With no
+	 * override, fall back to the server's settings-level `enabled` flag —
+	 * infinity fork change so a server marked enabled in --ui-config defaults
+	 * ON for new chats instead of always starting off.
 	 */
 	#checkServerEnabled(
 		server: MCPServerSettingsEntry,
 		perChatOverrides?: McpServerOverride[]
 	): boolean {
 		const override = perChatOverrides?.find((o) => o.serverId === server.id);
-		return override?.enabled ?? false;
+		return override?.enabled ?? server.enabled ?? false;
 	}
 
 	/**
