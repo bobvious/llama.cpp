@@ -247,15 +247,21 @@ class ModelsStore {
 	 * Triggers an async fetch of model props if not yet cached in ROUTER mode.
 	 */
 	get supportsThinking(): boolean {
+		// MODEL (single-model) mode: the server-level /props IS the loaded
+		// model's props. The per-model cache is only populated by ROUTER-mode
+		// paths, so consulting it here (which happens whenever a model got
+		// auto-selected on page load) always came back empty and hid the
+		// Reasoning control on every single-model server.
+		if (!isRouterMode()) {
+			return detectThinkingSupport(serverStore.props?.chat_template ?? '');
+		}
+
 		const modelId = this.selectedModelName;
 		if (!modelId) {
-			if (!isRouterMode()) {
-				return detectThinkingSupport(serverStore.props?.chat_template ?? '');
-			}
 			return false;
 		}
 
-		if (isRouterMode() && !this.modelPropsCache.get(modelId)) {
+		if (!this.modelPropsCache.get(modelId)) {
 			this.fetchModelProps(modelId);
 		}
 		const props = this.getModelProps(modelId);
@@ -269,7 +275,12 @@ class ModelsStore {
 	checkModelSupportsThinking(modelId: string): boolean {
 		if (!modelId) return false;
 
-		if (isRouterMode() && !this.modelPropsCache.get(modelId)) {
+		// MODEL mode: server-level props are authoritative (see supportsThinking).
+		if (!isRouterMode()) {
+			return detectThinkingSupport(serverStore.props?.chat_template ?? '');
+		}
+
+		if (!this.modelPropsCache.get(modelId)) {
 			this.fetchModelProps(modelId);
 		}
 
@@ -281,14 +292,16 @@ class ModelsStore {
 	 * Detailed thinking support detection result with reason for debugging/UI.
 	 */
 	get thinkingSupportDetails(): { supported: boolean; reason: string } {
+		// MODEL mode: server-level props are authoritative (see supportsThinking).
+		if (!isRouterMode()) {
+			return detectThinkingSupportWithReason(serverStore.props?.chat_template ?? '');
+		}
+
 		const modelId = this.selectedModelName;
 		if (!modelId) {
-			if (!isRouterMode()) {
-				return detectThinkingSupportWithReason(serverStore.props?.chat_template ?? '');
-			}
 			return { supported: false, reason: 'No model selected' };
 		}
-		if (isRouterMode() && !this.modelPropsCache.get(modelId)) {
+		if (!this.modelPropsCache.get(modelId)) {
 			this.fetchModelProps(modelId);
 		}
 		const props = this.getModelProps(modelId);
