@@ -104,7 +104,9 @@ llama_model_muse_glimmer::graph::graph(const llama_model & model, const llm_grap
                     n_embd_head, n_head, n_head_kv, il);
 
             // gate = wqkv_gate @ attn_inp (from pre-attn hidden state)
-            ggml_tensor * gate = build_lora_mm(model.layers[il].wqkv_gate, attn_inp);
+            // NVFP4 per-tensor scale MUST be passed or these weights run unscaled (~4e-5),
+            // which produces one repeated token forever. See ggml-org/llama.cpp#27178.
+            ggml_tensor * gate = build_lora_mm(model.layers[il].wqkv_gate, attn_inp, model.layers[il].wqkv_gate_s);
             cb(gate, "attn_gate_proj", il);
 
             // QK-norm. attn_q_norm weight was synthesized at conversion to broadcast
@@ -160,10 +162,11 @@ llama_model_muse_glimmer::graph::graph(const llama_model & model, const llm_grap
         cb(cur, "ffn_norm", il);
 
         // SwiGLU dense FFN
+        // NVFP4 scales passed here too (#27178); mirrors qwen3.cpp.
         cur = build_ffn(cur,
-                model.layers[il].ffn_up,   NULL, NULL,
-                model.layers[il].ffn_gate, NULL, NULL,
-                model.layers[il].ffn_down, NULL, NULL,
+                model.layers[il].ffn_up,   NULL, model.layers[il].ffn_up_s,
+                model.layers[il].ffn_gate, NULL, model.layers[il].ffn_gate_s,
+                model.layers[il].ffn_down, NULL, model.layers[il].ffn_down_s,
                 NULL,
                 LLM_FFN_SILU, LLM_FFN_PAR, il);
         cb(cur, "ffn_out", il);
