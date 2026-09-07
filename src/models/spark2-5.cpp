@@ -94,7 +94,9 @@ llama_model_spark2_5::graph::graph(const llama_model & model, const llm_graph_pa
                 Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);
         cb(cur, "attn_out", il);
 
-        ggml_tensor * gate = build_lora_mm(model.layers[il].wqkv_gate, attn_inp);
+        // NVFP4 per-tensor scale MUST be passed or these weights run unscaled (~4e-5),
+        // which produces one repeated token forever. See ggml-org/llama.cpp#27178.
+        ggml_tensor * gate = build_lora_mm(model.layers[il].wqkv_gate, attn_inp, model.layers[il].wqkv_gate_s);
         gate = ggml_sigmoid(ctx0, gate);
         cb(gate, "attn_gate", il);
 
@@ -119,10 +121,11 @@ llama_model_spark2_5::graph::graph(const llama_model & model, const llm_graph_pa
         cur = build_norm(ffn_inp, model.layers[il].ffn_norm, nullptr, LLM_NORM_RMS, il);
         cb(cur, "ffn_norm", il);
 
+        // NVFP4 scales passed here too (#27178); mirrors qwen3.cpp and muse-glimmer.cpp.
         cur = build_ffn(cur,
-                model.layers[il].ffn_up, nullptr, nullptr,
-                model.layers[il].ffn_gate, nullptr, nullptr,
-                model.layers[il].ffn_down, nullptr, nullptr,
+                model.layers[il].ffn_up,   nullptr, model.layers[il].ffn_up_s,
+                model.layers[il].ffn_gate, nullptr, model.layers[il].ffn_gate_s,
+                model.layers[il].ffn_down, nullptr, model.layers[il].ffn_down_s,
                 nullptr,
                 LLM_FFN_GELU, LLM_FFN_PAR, il);
         cb(cur, "ffn_out", il);
