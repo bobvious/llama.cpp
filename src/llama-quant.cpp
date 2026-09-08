@@ -490,8 +490,31 @@ static ggml_type llama_tensor_get_type_impl(quantize_state_impl & qs, ggml_type 
             new_type = GGML_TYPE_Q8_0;
         }
     } else if (ftype == LLAMA_FTYPE_MOSTLY_NVFP4) {
-        // weight tensors -> NVFP4 (ne[0] % block != 0 falls back to Q8_0 in tensor_type_fallback)
-        new_type = GGML_TYPE_NVFP4;
+        // E2M1 FP4 has 15 useful levels and per-16-element scales, so spare the tensors
+        // where Q4_K_M spends extra bits. Mirrors the Q4_K_M map below with NVFP4 as the
+        // base type instead of Q4_K. Counters are incremented locally because this branch
+        // runs before the Q4_K_M branches that normally advance them.
+        // Pure NVFP4 remains available via --pure or --tensor-type overrides.
+        if (category_is_attn_v(category)) {
+            if (qs.model.hparams.n_expert == 8) {
+                new_type = GGML_TYPE_Q8_0;
+            } else if (use_more_bits(qs.i_attention_wv, qs.n_attention_wv)) {
+                new_type = GGML_TYPE_Q6_K;
+            } else {
+                new_type = GGML_TYPE_NVFP4;
+            }
+            ++qs.i_attention_wv;
+        } else if (category == tensor_category::FFN_DOWN) {
+            auto info = layer_info(qs.i_ffn_down, qs.n_ffn_down, name.c_str());
+            new_type = use_more_bits(info.first, info.second) ? GGML_TYPE_Q6_K : GGML_TYPE_NVFP4;
+            ++qs.i_ffn_down;
+        } else if (category == tensor_category::ATTENTION_QKV) {
+            new_type = GGML_TYPE_Q5_K;
+        } else if (category == tensor_category::ATTENTION_OUTPUT && qs.model.hparams.n_expert == 8) {
+            new_type = GGML_TYPE_Q5_K;
+        } else {
+            new_type = GGML_TYPE_NVFP4;
+        }
     } else if (category == tensor_category::TOKEN_EMBD) {
         if (qs.params->token_embedding_type < GGML_TYPE_COUNT) {
             new_type = qs.params->token_embedding_type;
