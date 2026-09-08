@@ -393,6 +393,21 @@ static void quantize_row_nvfp4_core(const float * GGML_RESTRICT x, block_nvfp4 *
     assert(k % qk == 0);
     const int nb = k / qk;
 
+    // EXPERIMENT v2 (Helix 2026-09-08): k-quant activation-magnitude weighting, ROW-scoped.
+    // 🔴 v1 scoped sigma2 to the 16-element sub-block -- the SAME unit that shares the scale --
+    // which self-normalizes every block and destroys the dynamic-range signal the term exists to
+    // carry. EVERY other sigma2 in this file is scoped BROADER than the unit it weights:
+    // q4_K uses 2*sum_x2/QK_K over 256 while weighting 32; q4_0 uses sum_x2/n_per_row over the
+    // WHOLE ROW while weighting 32. v1's null result measured a self-normalized variant, not this.
+    float sigma2 = 0.0f;
+    if (quant_weights) {
+        float sum_x2 = 0.0f;
+        for (int64_t j = 0; j < k; ++j) {
+            sum_x2 += x[j]*x[j];
+        }
+        sigma2 = 2.0f*sum_x2/k;
+    }
+
     for (int i = 0; i < nb; i++) {
         for (int s = 0; s < n_sub; s++) {
             const float * xb = x + i*qk + s*qk_sub;
@@ -408,15 +423,6 @@ static void quantize_row_nvfp4_core(const float * GGML_RESTRICT x, block_nvfp4 *
             // amax / 6.0 maps the max E2M1 value (6.0) to amax
             const uint8_t base = ggml_fp32_to_ue4m3(amax / 6.0f);
 
-            // EXPERIMENT (Helix 2026-09-08): k-quant-style activation-magnitude weighting.
-            float sigma2 = 0.0f;
-            if (wb) {
-                float sum_x2 = 0.0f;
-                for (int j = 0; j < qk_sub; ++j) {
-                    sum_x2 += xb[j]*xb[j];
-                }
-                sigma2 = 2.0f*sum_x2/qk_sub;
-            }
 
             uint8_t best_code = 0;
             float   best_cost = INFINITY;
