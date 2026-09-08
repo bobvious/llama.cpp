@@ -408,6 +408,16 @@ static void quantize_row_nvfp4_core(const float * GGML_RESTRICT x, block_nvfp4 *
             // amax / 6.0 maps the max E2M1 value (6.0) to amax
             const uint8_t base = ggml_fp32_to_ue4m3(amax / 6.0f);
 
+            // EXPERIMENT (Helix 2026-09-08): k-quant-style activation-magnitude weighting.
+            float sigma2 = 0.0f;
+            if (wb) {
+                float sum_x2 = 0.0f;
+                for (int j = 0; j < qk_sub; ++j) {
+                    sum_x2 += xb[j]*xb[j];
+                }
+                sigma2 = 2.0f*sum_x2/qk_sub;
+            }
+
             uint8_t best_code = 0;
             float   best_cost = INFINITY;
             uint8_t best_idx[QK_NVFP4_SUB] = { 0 };
@@ -426,7 +436,7 @@ static void quantize_row_nvfp4_core(const float * GGML_RESTRICT x, block_nvfp4 *
                 for (int j = 0; j < qk_sub; ++j) {
                     idx[j] = best_index_mxfp4(xb[j], d);
                     const float r = kvalues_mxfp4[idx[j]] * d - xb[j];
-                    const float w = wb ? wb[j] : 1.0f;
+                    const float w = wb ? wb[j]*sqrtf(sigma2 + xb[j]*xb[j]) : 1.0f;
                     cost += w * r * r;
                 }
                 if (cost < best_cost) {

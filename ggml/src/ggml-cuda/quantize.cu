@@ -125,6 +125,11 @@ __device__ __forceinline__ uint8_t compute_e8m0_scale(float amax) {
 
 // scatter: grid over tokens, quantize once, write to all the token's compact rows
 template <bool scatter, bool use_aligned_float8>
+// SWEEP KNOB (Helix 2026-09-08): how many UE4M3 scale codes the ACTIVATION search tries.
+// Upstream default is 5. Weight path (PR #25153) uses 25, but that is a one-off quantize
+// cost; this kernel runs per matmul, so the width is a KLD-vs-prefill trade. See RESULTS.md.
+#define NVFP4_ACT_SEARCH_N 7
+
 static __global__ void quantize_mmq_nvfp4(
         const float * __restrict__ x, const int32_t * __restrict__ ids, void * __restrict__ vy, float * __restrict__ scale,
         const int64_t ne00, const int64_t s01, const int64_t s02, const int64_t s03,
@@ -230,7 +235,18 @@ static __global__ void quantize_mmq_nvfp4(
             amax_sub = fmaxf(amax_sub, fabsf(vals[k] * inv_col_scale));
         }
 
-        static constexpr int test_offsets[5] = { 0, -1, 1, -2, 2 };
+        // EXPERIMENT (Helix 2026-09-08, review section 8): the WEIGHT path searches 25 UE4M3
+        // codes (PR #25153, NVFP4_SCALE_SEARCH 12) while this ACTIVATION path searched only 5.
+        // Widen to the same +-12 window to test whether the production W4A4 path is leaving
+        // accuracy on the table. Runtime-only: no file/format change, no requantization.
+        // Offsets are ordered 0,-1,+1,-2,+2,... so using the first NVFP4_ACT_SEARCH_N entries
+        // yields a symmetric window; only the #define changes between sweep arms.
+        // ASYMMETRIC arm (Helix 2026-09-08): the symmetric sweep showed the GAINS COME FROM THE
+        // FAR OFFSETS (+-3 bought nothing, +-4/+-5/+-6 bought 3%), and our weight-side encoder work
+        // found the optimum at rtn+0..+5 in 98% of sub-blocks. If activations share that positive
+        // bias, a symmetric window wastes half its budget on codes that never win.
+        static constexpr int test_offsets[25] = { 0, 1, 2, 3, 4, 5, 6, -1, -2, -3, -4, -5, -6,
+                                                  7, 8, 9, 10, 11, 12, -7, -8, -9, -10, -11, -12 };
         const int first_fp8_code = (int) ggml_cuda_fp32_to_ue4m3(amax_sub / 6.0f);
 
         uint8_t fp8_code = (uint8_t) first_fp8_code;
@@ -250,7 +266,7 @@ static __global__ void quantize_mmq_nvfp4(
 #endif // CUDART_VERSION >= 12080
 
 #pragma unroll
-        for (int i = 1; i < 5; ++i) {
+        for (int i = 1; i < NVFP4_ACT_SEARCH_N; ++i) {
             const int test_code = first_fp8_code + test_offsets[i];
             if (test_code < 0 || test_code > 0x7e) {
                 continue;
