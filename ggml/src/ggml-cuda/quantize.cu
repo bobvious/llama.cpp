@@ -128,7 +128,8 @@ template <bool scatter, bool use_aligned_float8>
 static __global__ void quantize_mmq_nvfp4(
         const float * __restrict__ x, const int32_t * __restrict__ ids, void * __restrict__ vy, float * __restrict__ scale,
         const int64_t ne00, const int64_t s01, const int64_t s02, const int64_t s03,
-        const int64_t ne0, const int64_t ne1, const int64_t ne2, const int n_expert_used) {
+        const int64_t ne0, const int64_t ne1, const int64_t ne2, const int n_expert_used,
+        const float act_scale_mul) {
 #if defined(BLACKWELL_MMA_AVAILABLE)
 
     const int64_t blocks_per_col = (ne0 + QK_FP4_MMQ - 1) / QK_FP4_MMQ;
@@ -179,7 +180,12 @@ static __global__ void quantize_mmq_nvfp4(
         amax = threadIdx.x < int(CUDA_QUANTIZE_BLOCK_SIZE_MMQ / WARP_SIZE) ? warp_amax[lane] : 0.0f;
         amax = warp_reduce_max<WARP_SIZE>(amax);
         if (lane == 0) {
-            warp_amax[0] = amax / (6.0f * 448.0f);
+            // Level-1 (per-row) scale. The 6*448 divisor is what guarantees the
+            // level-2 UE4M3 sub-block code can represent amax_sub/6 without
+            // overflow. act_scale_mul is a probe knob: >1 emulates a static
+            // per-tensor calibrated scale (always >= the per-row amax), <1
+            // drives the level-2 code past 448 and clips.
+            warp_amax[0] = amax * act_scale_mul / (6.0f * 448.0f);
             if constexpr (scatter) {
 #pragma unroll
                 for (int slot = 0; slot < n_expert_used; ++slot) {
@@ -329,6 +335,25 @@ static __global__ void quantize_mmq_nvfp4(
     NO_DEVICE_CODE; // This is for Blackwell NVFP4 activations only.
 #endif // defined(BLACKWELL_MMA_AVAILABLE)
 
+}
+
+// Probe knob for the NVFP4 activation level-1 scale (see quantize_mmq_nvfp4).
+// GGML_NVFP4_ACT_SCALE_MUL=1.0 is the stock path. Read once.
+static float nvfp4_act_scale_mul() {
+    static const float mul = []() {
+        const char * s = getenv("GGML_NVFP4_ACT_SCALE_MUL");
+        if (!s) {
+            return 1.0f;
+        }
+        const float v = strtof(s, nullptr);
+        if (!(v > 0.0f) || !isfinite(v)) {
+            GGML_LOG_WARN("%s: ignoring non-positive GGML_NVFP4_ACT_SCALE_MUL='%s'\n", __func__, s);
+            return 1.0f;
+        }
+        GGML_LOG_INFO("%s: NVFP4 activation level-1 scale multiplier = %g\n", __func__, v);
+        return v;
+    }();
+    return mul;
 }
 
 // quantize values in the format mxfp4 is stored which is interleaved nibbles
@@ -645,10 +670,10 @@ void quantize_scatter_mmq_fp4_cuda(
         const dim3 num_blocks(n_tokens, 1, 1);
         if (use_aligned_float8) {
             quantize_mmq_nvfp4<true, true><<<num_blocks, block_size, 0, stream>>>(
-                x, ids_src1_inv, vy, scale, ne00, /*s01=*/0, /*s02=*/stride_token, /*s03=*/0, ne0, /*ne1=*/nrows_dst, /*ne2=*/1, n_expert_used);
+                x, ids_src1_inv, vy, scale, ne00, /*s01=*/0, /*s02=*/stride_token, /*s03=*/0, ne0, /*ne1=*/nrows_dst, /*ne2=*/1, n_expert_used, nvfp4_act_scale_mul());
         } else {
             quantize_mmq_nvfp4<true, false><<<num_blocks, block_size, 0, stream>>>(
-                x, ids_src1_inv, vy, scale, ne00, /*s01=*/0, /*s02=*/stride_token, /*s03=*/0, ne0, /*ne1=*/nrows_dst, /*ne2=*/1, n_expert_used);
+                x, ids_src1_inv, vy, scale, ne00, /*s01=*/0, /*s02=*/stride_token, /*s03=*/0, ne0, /*ne1=*/nrows_dst, /*ne2=*/1, n_expert_used, nvfp4_act_scale_mul());
         }
     } else {
         GGML_ASSERT(type_src0 == GGML_TYPE_MXFP4);
@@ -676,10 +701,10 @@ void quantize_mmq_fp4_cuda(
         const dim3 num_blocks(ne1, ne2 * ne3, 1);
         if (use_aligned_float8) {
             quantize_mmq_nvfp4<false, true><<<num_blocks, block_size, 0, stream>>>(
-                x, ids, vy, scale, ne00, s01, s02, s03, ne0, ne1, ne2, /*n_expert_used=*/0);
+                x, ids, vy, scale, ne00, s01, s02, s03, ne0, ne1, ne2, /*n_expert_used=*/0, nvfp4_act_scale_mul());
         } else {
             quantize_mmq_nvfp4<false, false><<<num_blocks, block_size, 0, stream>>>(
-                x, ids, vy, scale, ne00, s01, s02, s03, ne0, ne1, ne2, /*n_expert_used=*/0);
+                x, ids, vy, scale, ne00, s01, s02, s03, ne0, ne1, ne2, /*n_expert_used=*/0, nvfp4_act_scale_mul());
         }
     } else {
         GGML_ASSERT(ne0 % (2 * QK_MXFP4) == 0);
