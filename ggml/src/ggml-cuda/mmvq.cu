@@ -1,4 +1,6 @@
 #include "mmvq.cuh"
+
+#include <cstdlib>
 #include "quantize.cuh"
 #include "unary.cuh"
 #include "vecdotq.cuh"
@@ -315,8 +317,34 @@ int get_mmvq_mmid_max_batch(ggml_type type, int cc) {
     return MMVQ_MAX_BATCH_SIZE;
 }
 
+// GGML_CUDA_NVFP4_NO_MMVQ=1 keeps NVFP4 off the MMVQ path at every batch size, so small
+// batches fall through to native FP4 MMQ instead.
+//
+// WHY THIS EXISTS. MMVQ dots NVFP4 weights against q8_1 activations (vec_dot_nvfp4_q8_1), i.e.
+// NVFP4 runs as W4A8 below MMVQ_MAX_BATCH_SIZE and as W4A4 above it. vLLM and SGLang quantize
+// activations to FP4 at EVERY batch size, so "parity with them" means moving decode from 8-bit
+// activations to 4-bit -- the side of the comparison our own measurements call defective.
+// The calibrated .input_scale only has meaning on the FP4 side; there is nothing for it to
+// scale on the q8_1 path.
+//
+// So this flag is a MEASUREMENT INSTRUMENT, not a fix: it prices W4A4+calibration against
+// W4A8-without on our own hardware, one env var apart in the same binary, instead of inferring
+// the answer from someone else's design. Scoped to the DENSE mul_mat dispatch; mul_mat_id
+// (MoE) is unaffected, which is fine because the models under test here are dense.
+// Read once per process -- this is on the dispatch path.
+static bool ggml_cuda_nvfp4_no_mmvq() {
+    static const bool off = [] {
+        const char * e = getenv("GGML_CUDA_NVFP4_NO_MMVQ");
+        return e != nullptr && *e != 0 && *e != '0';
+    }();
+    return off;
+}
+
 bool ggml_cuda_should_use_mmvq(enum ggml_type type, int cc, int64_t ne11) {
     if (!ggml_is_quantized(type)) {
+        return false;
+    }
+    if (type == GGML_TYPE_NVFP4 && ggml_cuda_nvfp4_no_mmvq()) {
         return false;
     }
     // k-quants cost more to decode and mvq redoes that per column, so MMQ wins sooner.
