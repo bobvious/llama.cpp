@@ -106,7 +106,8 @@ llama_model_muse_glimmer::graph::graph(const llama_model & model, const llm_grap
             // gate = wqkv_gate @ attn_inp (from pre-attn hidden state)
             // NVFP4 per-tensor scale MUST be passed or these weights run unscaled (~4e-5),
             // which produces one repeated token forever. See ggml-org/llama.cpp#27178.
-            ggml_tensor * gate = build_lora_mm(model.layers[il].wqkv_gate, attn_inp, model.layers[il].wqkv_gate_s);
+            ggml_tensor * gate = build_lora_mm(model.layers[il].wqkv_gate, attn_inp, model.layers[il].wqkv_gate_s,
+                                               model.layers[il].wqkv_gate_in_s);
             cb(gate, "attn_gate_proj", il);
 
             // QK-norm. attn_q_norm weight was synthesized at conversion to broadcast

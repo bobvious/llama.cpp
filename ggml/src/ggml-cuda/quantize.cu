@@ -129,7 +129,7 @@ static __global__ void quantize_mmq_nvfp4(
         const float * __restrict__ x, const int32_t * __restrict__ ids, void * __restrict__ vy, float * __restrict__ scale,
         const int64_t ne00, const int64_t s01, const int64_t s02, const int64_t s03,
         const int64_t ne0, const int64_t ne1, const int64_t ne2, const int n_expert_used,
-        const float input_scale) {
+        const float * __restrict__ input_scale) {
 #if defined(BLACKWELL_MMA_AVAILABLE)
 
     const int64_t blocks_per_col = (ne0 + QK_FP4_MMQ - 1) / QK_FP4_MMQ;
@@ -184,7 +184,8 @@ static __global__ void quantize_mmq_nvfp4(
             // (fp4_quantize) use the checkpoint's CALIBRATED input_scale here; deriving it from a
             // runtime amax lets a single outlier token rescale the whole row. Fall back to the
             // runtime value when the checkpoint carries no scale.
-            warp_amax[0] = input_scale > 0.0f ? input_scale : amax / (6.0f * 448.0f);
+            const float cal = input_scale ? *input_scale : 0.0f;
+            warp_amax[0] = cal > 0.0f ? cal : amax / (6.0f * 448.0f);
             if constexpr (scatter) {
 #pragma unroll
                 for (int slot = 0; slot < n_expert_used; ++slot) {
@@ -641,7 +642,7 @@ void quantize_scatter_mmq_q8_1_cuda(
 void quantize_scatter_mmq_fp4_cuda(
         const float * x, const int32_t * ids_src1_inv, void * vy, float * scale, const ggml_type type_src0, const bool use_aligned_float8,
         const int64_t ne00, const int64_t stride_token, const int64_t ne0,
-        const int64_t n_tokens, const int64_t nrows_dst, const int n_expert_used, const float input_scale,
+        const int64_t n_tokens, const int64_t nrows_dst, const int n_expert_used, const float * input_scale,
         cudaStream_t stream) {
     GGML_ASSERT(ne0 > 0);
     if (type_src0 == GGML_TYPE_NVFP4) {
@@ -671,7 +672,7 @@ void quantize_scatter_mmq_fp4_cuda(
 void quantize_mmq_fp4_cuda(
         const float * x, const int32_t * ids, void * vy, float * scale, const ggml_type type_src0, const bool use_aligned_float8,
         const int64_t ne00, const int64_t s01, const int64_t s02, const int64_t s03,
-        const int64_t ne0, const int64_t ne1, const int64_t ne2, const int64_t ne3, const float input_scale,
+        const int64_t ne0, const int64_t ne1, const int64_t ne2, const int64_t ne3, const float * input_scale,
         cudaStream_t stream) {
     GGML_ASSERT(type_src0 == GGML_TYPE_MXFP4 || type_src0 == GGML_TYPE_NVFP4);
     GGML_ASSERT(ne0 > 0);

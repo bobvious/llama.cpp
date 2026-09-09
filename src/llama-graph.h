@@ -1049,11 +1049,15 @@ struct llm_graph_context {
              ggml_tensor * cur,
                      int   il) const;
 
-    // do mat_mul, while optionally apply lora and per-tensor scale
+    // do mat_mul, while optionally apply lora and per-tensor scale.
+    // w_in_s is the CALIBRATED NVFP4 ACTIVATION scale; it is attached to the mul_mat node as
+    // a real SOURCE, because it must reach the CUDA activation quantizer intact. Metadata
+    // carriers do not survive backend copies, tensor-split or views -- see quantize.cuh.
     ggml_tensor * build_lora_mm(
               ggml_tensor * w,
               ggml_tensor * cur,
-              ggml_tensor * w_s = nullptr) const;
+              ggml_tensor * w_s    = nullptr,
+              ggml_tensor * w_in_s = nullptr) const;
 
     // do mat_mul_id, while optionally apply lora and per-expert scale
     ggml_tensor * build_lora_mm_id(

@@ -1514,8 +1514,25 @@ ggml_tensor * llm_graph_context::build_cvec(
 ggml_tensor * llm_graph_context::build_lora_mm(
           ggml_tensor * w,
           ggml_tensor * cur,
-          ggml_tensor * w_s) const {
+          ggml_tensor * w_s,
+          ggml_tensor * w_in_s) const {
     ggml_tensor * res = ggml_mul_mat(ctx0, w, cur);
+
+    // Attach the calibrated NVFP4 activation scale to the MUL_MAT node itself. It must be a
+    // SOURCE, not metadata: the scheduler preserves srcs across offload copies, tensor-split
+    // and views, whereas op_params is zeroed by ggml_dup_tensor, snapshotted early by the
+    // Meta backend, and already holds a view's byte offset. Set BEFORE the w_s multiply so it
+    // lands on the matmul rather than on the scaling node.
+    //
+    // 🔴 SLOT 3, NOT 2. src[2] is ALREADY the `ids` operand of GGML_MUL_MAT_ID, and the CUDA
+    // dispatch reads dst->src[2] as ids unconditionally (ggml-cuda.cu:1905) -- putting the
+    // scale there makes a plain matmul look like a mul_mat_id and trips
+    // GGML_ASSERT(!ids || ids->type == GGML_TYPE_I32) in mmvq.cu on the first decode token.
+    // Measured, not theorised: it aborted immediately on Glimmer. A hole at src[2] is fine;
+    // graph traversal walks the full GGML_MAX_SRC range (ggml.c:7221).
+    if (w_in_s) {
+        res->src[3] = w_in_s;
+    }
 
     if (w_s) {
         res = ggml_mul(ctx0, res, w_s);

@@ -4,15 +4,32 @@
 #include "mmq.cuh"
 
 #include <cstdint>
-#include <cstring>
 
-// Calibrated NVFP4 level-2 (per-tensor) ACTIVATION scale, stashed on the weight tensor's
-// otherwise-unused op_params at load time. 0 => the checkpoint carried none; the kernel then
-// falls back to the runtime per-row amax (upstream behaviour).
-static inline float ggml_cuda_nvfp4_act_scale(const ggml_tensor * w) {
-    float s = 0.0f;
-    memcpy(&s, &w->op_params[0], sizeof(float));
-    return s > 0.0f ? s : 0.0f;
+// Calibrated NVFP4 level-2 (per-tensor) ACTIVATION scale.
+//
+// 🔴 CARRIED AS A REAL GRAPH SOURCE (mul_mat src[2]), NOT as tensor metadata. An earlier
+// version of this patch stashed it in the weight's op_params; a GPT-6 Astra review found three
+// independent ways that silently fails, all verified in-tree:
+//   * ggml_dup_tensor() inits op_params={0} (ggml.c:1815) and ggml_dup_tensor_layout copies
+//     only nb[] (ggml-backend.cpp:749-754), so any backend OFFLOAD COPY drops the scale;
+//   * the Meta backend snapshots op_params during buffer alloc, BEFORE a post-load write, so
+//     LLAMA_SPLIT_MODE_TENSOR keeps the stale zero;
+//   * ggml stores a VIEW's byte offset in op_params (ggml.c:3791) -- so a view of an NVFP4
+//     weight yields a positive normal float that would be read as a calibration scale, which
+//     breaks the fallback even for checkpoints carrying NO scale at all.
+// A src is preserved by copies, splits and views by construction. Do not "simplify" this back
+// into metadata. The device pointer is null when the checkpoint has no calibration.
+
+// Device pointer to the 1-element F32 calibration scale carried on a mul_mat node as src[3],
+// or nullptr when the checkpoint had none (=> kernel keeps the runtime-amax behaviour).
+// NOTE src[3]: src[2] is the `ids` operand of GGML_MUL_MAT_ID and is read as such by the CUDA
+// dispatch (ggml-cuda.cu:1905), so the scale cannot live there. See llama-graph.cpp.
+static inline const float * ggml_cuda_nvfp4_act_scale_ptr(const ggml_tensor * dst) {
+    const ggml_tensor * s = dst->src[3];
+    if (s == nullptr || s->type != GGML_TYPE_F32 || ggml_nelements(s) != 1 || s->data == nullptr) {
+        return nullptr;
+    }
+    return (const float *) s->data;
 }
 
 #define CUDA_QUANTIZE_BLOCK_SIZE     256
@@ -50,7 +67,7 @@ void quantize_mmq_fp4_cuda(const float *   x,
                              int64_t         ne1,
                              int64_t         ne2,
                              int64_t         ne3,
-                             float           input_scale,
+                             const float *   input_scale,
                              cudaStream_t    stream);
 
 // quantize each token once and scatter the block to its compact rows (via the inverse map)
@@ -66,7 +83,7 @@ void quantize_scatter_mmq_fp4_cuda(const float *   x,
                                    int64_t         n_tokens,
                                    int64_t         nrows_dst,
                                    int             n_expert_used,
-                                   float           input_scale,
+                                   const float *   input_scale,
                                    cudaStream_t    stream);
 
 void quantize_scatter_mmq_q8_1_cuda(const float *   x,

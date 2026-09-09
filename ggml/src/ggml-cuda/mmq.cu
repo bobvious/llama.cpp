@@ -150,7 +150,7 @@ void ggml_cuda_mul_mat_q(
                 const bool use_aligned_float8 = ggml_cuda_is_aligned(src1, align_float8);
                 static_assert(sizeof(block_fp4_mmq) == 4 * sizeof(block_q8_1));
                 quantize_mmq_fp4_cuda(src1_d, nullptr, src1_q8_1.get(), src1_scale.ptr, src0->type, use_aligned_float8, ne10, s11, s12, s13, ne10_padded,
-                                        ne11, ne12, ne13, ggml_cuda_nvfp4_act_scale(src0), stream);
+                                        ne11, ne12, ne13, ggml_cuda_nvfp4_act_scale_ptr(dst), stream);
 
             } else {
                 quantize_mmq_q8_1_cuda(src1_d, nullptr, src1_q8_1.get(), src0->type, ne10, s11, s12, s13, ne10_padded,
@@ -225,10 +225,10 @@ void ggml_cuda_mul_mat_q(
             if (dedup_bcast) {
                 quantize_scatter_mmq_fp4_cuda(src1_d, ids_src1.get(), src1_q8_1.get(), src1_scale.ptr, src0->type, use_aligned_float8, ne10,
                                         /*stride_token=*/s12, ne10_padded, ne12, ne11_flat, n_expert_used,
-                                        ggml_cuda_nvfp4_act_scale(src0), stream);
+                                        ggml_cuda_nvfp4_act_scale_ptr(dst), stream);
             } else {
                 quantize_mmq_fp4_cuda(src1_d, ids_src1.get(), src1_q8_1.get(), src1_scale.ptr, src0->type, use_aligned_float8, ne10, s11, s12, s13,
-                                        ne10_padded, ne11_flat, ne12_flat, ne13_flat, ggml_cuda_nvfp4_act_scale(src0), stream);
+                                        ne10_padded, ne11_flat, ne12_flat, ne13_flat, ggml_cuda_nvfp4_act_scale_ptr(dst), stream);
             }
         } else if (dedup_bcast) {
             quantize_scatter_mmq_q8_1_cuda(src1_d, ids_src1.get(), src1_q8_1.get(), src0->type, ne10,
