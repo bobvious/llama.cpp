@@ -140,12 +140,32 @@ void ggml_cuda_mul_mat_q(
     // get_J_max computes ret = min(ne11,512); ret -= ret % 8 (mmq.cuh:366-375), so it
     // returns 0 for every ne11 < 8. J=0 matches no row, and the table's fallthrough
     // sentinel (mmq-config-ampere.cuh:382) reports SRAM_LAYOUT_Q8_0 -- making the probe
-    // false for EVERY single-token decode, and for MoE broadcast (ne11==1), while the
-    // device still launches a J>=8 kernel that uses the native FP4 loader/dot pair. Host
-    // packs q8_1, device reads FP4: wrong numbers from the first K iteration, and it
-    // links and runs. Shared memory happens not to fault only because the FP4 and Q8_1
-    // strides are equal by static_assert (mmq.cuh:161).
-    // Found by the Muse Spark review, 2026-09-09, Finding 1.
+    // false for EVERY ne11 < 8 that REACHES THIS FUNCTION, while the device still launches
+    // a J>=8 kernel that uses the native FP4 loader/dot pair. Host packs q8_1, device reads
+    // FP4: wrong numbers from the first K iteration, and it links and runs. Shared memory
+    // happens not to fault only because the FP4 and Q8_1 strides are equal by static_assert
+    // (mmq.cuh:161).
+    //
+    // WHICH TRAFFIC ACTUALLY REACHES IT (traced 2026-09-09; the original commit message said
+    // "every single-token decode", which is TOO BROAD for NVFP4 in this tree):
+    //   - dense NVFP4: ggml_cuda_should_use_mmvq returns ne11 <= MMVQ_MAX_BATCH_SIZE (8)
+    //     via the Blackwell default (mmvq.cu:362-374), so ne11 < 8 goes to MMVQ and never
+    //     enters MMQ at all. Stock decode is NOT affected.
+    //   - NVFP4 MUL_MAT_ID: get_mmvq_mmid_max_batch_turing_plus returns 8 for NVFP4
+    //     (mmvq.cu:185), so MoE broadcast also lands in MMVQ. Not affected either.
+    //   - MXFP4 MUL_MAT_ID: that same table returns 7 (mmvq.cu:184), so ne2 == 8 falls past
+    //     MMVQ into MMQ while the expert path probes with the raw ne11 (== 1 for broadcast,
+    //     :238 below). THIS is the stock-build hole -- gpt-oss-class MXFP4 MoE, not us.
+    //   - GGML_CUDA_NVFP4_NO_MMVQ=1: forces dense NVFP4 past MMVQ (mmvq.cu:346-348), so our
+    //     OWN measurement instrument is what puts NVFP4 decode into the defective regime.
+    // Consequence for the record: this defect does not invalidate stock-path decode numbers;
+    // it invalidates any decode measured with NO_MMVQ (or FORCE_GENERIC) on a pre-fix build.
+    //
+    // PROVENANCE. Raised by the Muse Spark review as its Finding 1 on 2026-09-08 20:23 --
+    // seventeen hours BEFORE e504b6c9a cherry-picked the defect in. It was re-found by the
+    // Codex/gpt-6-astra review (F8) on 2026-09-09 and only then fixed. 52adc9dd6's message
+    // credits Astra alone; that is wrong, and the real failure is that a priority-1 finding
+    // was raised and dropped, not a naming slip.
     bool use_native_fp4 = blackwell_mma_available(cc) && (src0->type == GGML_TYPE_MXFP4 || src0->type == GGML_TYPE_NVFP4);
 #ifdef GGML_CUDA_NVFP4_FORCE_GENERIC
     if (src0->type == GGML_TYPE_NVFP4) {
@@ -286,8 +306,13 @@ void ggml_cuda_mul_mat_q(
         // The device-side y_scale guards are all "pointer != nullptr", so nullness is the
         // invariant that keeps the generic path from scaling its results by garbage --
         // and an invariant worth that much should be stated here, not inherited from an
-        // allocator's default. (Muse Spark review, Finding 3: it could not verify that
+        // allocator's default. (Muse Spark review, Finding 3, which could not verify that
         // default from the tree.)
+        // ⚠ NOT A BUG FIX. The Astra review (F13, 2026-09-09) DID verify it:
+        // ggml_cuda_pool_alloc<T>::ptr is nullptr-initialised (common.cuh:1211) and the
+        // allocation is already conditional on native NVFP4 (:240 above), so the old code
+        // was correct. This ternary is defensive symmetry only -- do not cite it as a
+        // correctness repair, and do not let it stand in for F8, which was the real one.
         src0->type == GGML_TYPE_NVFP4 && use_native_fp4 ? src1_scale.ptr : nullptr,
         ne00, ne01, ne_get_rows, s01, ne_get_rows, s1,
         ne02, ne02, s02, s12, s2,

@@ -42,9 +42,19 @@ struct nvfp4_trace_state {
     std::set<std::string>  seen;      // distinct outcomes already reported
     size_t                 n_graphs         = 0;
     size_t                 n_nvfp4_mm       = 0;  // NVFP4 matmuls dispatched
-    size_t                 n_with_scale     = 0;  // ... carrying a valid scale at the kernel
+    // 🔴 n_with_scale / n_native_scaled count a NON-NULL POINTER, nothing more. They are
+    // incremented before the value readback below, so a stale-but-positive or an outright
+    // bad scale still lands in them. "native AND scaled" therefore means "the carrier was
+    // present at the kernel", NOT "calibration in effect" -- the stronger reading is what
+    // the Astra review (F13) called out, and it is the reading these numbers were quoted
+    // under. The value-verified counters below are the ones that support that claim, and
+    // they only advance on DISTINCT (weight, path, scaled) triples because of the dedup.
+    size_t                 n_with_scale     = 0;  // ... carrying a non-null scale POINTER
     size_t                 n_native_mmq     = 0;  // ... that actually reached the FP4 quantizer
-    size_t                 n_native_scaled  = 0;  // ... native AND scaled = calibration in effect
+    size_t                 n_native_scaled  = 0;  // ... native AND carrier present
+    size_t                 n_value_ok       = 0;  // distinct tensors whose scale READ BACK finite > 0
+    size_t                 n_value_bad      = 0;  // distinct tensors whose scale read back garbage
+    size_t                 n_value_unread   = 0;  // readback attempted and FAILED (cudaMemcpy error)
     bool                   any_scale_ever   = false;
 };
 nvfp4_trace_state & trace_state() {
@@ -100,15 +110,21 @@ void ggml_cuda_nvfp4_trace_dispatch(
         const cudaError_t err = cudaMemcpy(&v, dptr, sizeof(float), cudaMemcpyDeviceToHost);
 
         if (err != cudaSuccess) {
+            st.n_value_unread++;
             GGML_LOG_WARN("NVFP4-TRACE: %-40s %-15s scale READBACK FAILED: %s\n",
                           name.c_str(), nvfp4_path_name(path), cudaGetErrorString(err));
         } else if (!std::isfinite(v) || v <= 0.0f) {
             // A pointer that survives every placement but carries garbage is the exact failure
             // the pointer-only check cannot see. Loud on purpose.
+            st.n_value_bad++;
             GGML_LOG_WARN("NVFP4-TRACE: %-40s %-15s 🔴 SCALE VALUE IS BAD: %.9g%s\n",
                           name.c_str(), nvfp4_path_name(path), v, mul_mat_id ? " (expert)" : "");
         } else {
-            GGML_LOG_WARN("NVFP4-TRACE: %-40s %-15s CALIBRATED SCALE IN EFFECT value=%.9g%s\n",
+            // Value read back finite and > 0 FOR THIS TENSOR. That is engagement, not
+            // agreement with the checkpoint: nothing here compares it to the exported
+            // input_scale, so a stale positive still reads as a pass. (Astra F13.)
+            st.n_value_ok++;
+            GGML_LOG_WARN("NVFP4-TRACE: %-40s %-15s SCALE VALUE OK (finite>0) value=%.9g%s\n",
                           name.c_str(), nvfp4_path_name(path), v, mul_mat_id ? " (expert)" : "");
         }
     } else if (native) {
@@ -165,8 +181,10 @@ void ggml_cuda_nvfp4_trace_graph(const ggml_cgraph * cgraph) {
     }
 
     if (nvfp4_trace_level() >= 2) {
-        GGML_LOG_WARN("NVFP4-TRACE: cumulative: %zu nvfp4 matmul dispatches, %zu with scale, "
-                      "%zu reached native fp4 MMQ, %zu of those scaled\n",
-                      st.n_nvfp4_mm, st.n_with_scale, st.n_native_mmq, st.n_native_scaled);
+        GGML_LOG_WARN("NVFP4-TRACE: cumulative: %zu nvfp4 matmul dispatches, %zu carrying a scale POINTER, "
+                      "%zu reached native fp4 MMQ, %zu of those with a POINTER; of the DISTINCT tensors "
+                      "read back: %zu good, %zu bad, %zu unreadable\n",
+                      st.n_nvfp4_mm, st.n_with_scale, st.n_native_mmq, st.n_native_scaled,
+                      st.n_value_ok, st.n_value_bad, st.n_value_unread);
     }
 }

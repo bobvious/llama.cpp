@@ -184,8 +184,14 @@ static __global__ void quantize_mmq_nvfp4(
             // (fp4_quantize) use the checkpoint's CALIBRATED input_scale here; deriving it from a
             // runtime amax lets a single outlier token rescale the whole row. Fall back to the
             // runtime value when the checkpoint carries no scale.
+            // isfinite, not just > 0: a malformed sidecar carrying +infinity passed the old
+            // `cal > 0.0f` test, stored an infinite row scale, and made the reciprocal below
+            // exactly 0 -- every activation in the row quantizes to zero, silently. The
+            // load-time isfinite check that used to catch this was removed by 788f1878e when
+            // the carrier moved from op_params to src[3]; this restores it at the point of
+            // use, where it cannot be bypassed by a different carrier. (Astra review F7.)
             const float cal = input_scale ? *input_scale : 0.0f;
-            warp_amax[0] = cal > 0.0f ? cal : amax / (6.0f * 448.0f);
+            warp_amax[0] = (isfinite(cal) && cal > 0.0f) ? cal : amax / (6.0f * 448.0f);
             if constexpr (scatter) {
 #pragma unroll
                 for (int slot = 0; slot < n_expert_used; ++slot) {
