@@ -18,8 +18,11 @@
 
 #include <cassert>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <numeric>
+#include <set>
 #include <sstream>
 #include <string>
 #include <unordered_set>
@@ -1532,6 +1535,36 @@ ggml_tensor * llm_graph_context::build_lora_mm(
     // graph traversal walks the full GGML_MAX_SRC range (ggml.c:7221).
     if (w_in_s) {
         res->src[3] = w_in_s;
+
+        // NVFP4-TRACE attach side. The CUDA backend counts how many NVFP4 matmuls carry a scale
+        // at the KERNEL; this counts how many we ATTACHED here. Those two numbers are the
+        // detector -- a kernel count lower than this one means the carrier was dropped between
+        // graph build and dispatch.
+        //
+        // The load-time count in llama-model.cpp is NOT a substitute: it counts sidecars present
+        // in the CHECKPOINT, so it also includes every role we have not wired yet. Today the two
+        // are separable only because the tensor names happen to distinguish them (only attn_gate
+        // is wired), and that stops working the moment a second role is added.
+        //
+        // Deduplicated by weight name so a per-token graph rebuild does not spam.
+        static const bool trace = getenv("GGML_CUDA_NVFP4_TRACE") != nullptr;
+        if (trace) {
+            static std::mutex           mtx;
+            static std::set<std::string> seen;
+            const std::string name = w->name[0] ? w->name : "<unnamed>";
+            std::lock_guard<std::mutex> lock(mtx);
+            if (seen.insert(name).second) {
+                // fprintf, NOT a log macro. MEASURED 2026-09-09 with both emitted side by side:
+                // LLAMA_LOG_WARN from graph build produced 0 lines while fprintf produced 52 and
+                // the kernel was demonstrably seeing 52 scales. llama-server installs its own
+                // llama log callback after load and LLAMA_LOG_* from here does not survive it.
+                // GGML_LOG_WARN is ggml-internal and not visible in this TU.
+                // A diagnostic whose job is catching silent failures must not depend on a log
+                // path that can silently drop it. stderr is captured by every runner we use.
+                fprintf(stderr, "NVFP4-TRACE: attached scale at graph build: %-40s (%zu distinct so far)\n",
+                        name.c_str(), seen.size());
+            }
+        }
     }
 
     if (w_s) {
