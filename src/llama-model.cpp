@@ -1849,6 +1849,56 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
         }
     }
 
+    // NVFP4: stash the checkpoint's CALIBRATED activation (level-2, per-tensor) input_scale on the
+    // WEIGHT tensor's otherwise-unused op_params, so the CUDA activation quantizer can use it in
+    // place of a runtime per-row amax. With the runtime value a single outlier token rescales the
+    // whole row; vLLM (scaled_fp4_quant) and SGLang (fp4_quantize) both use the calibrated scale.
+    //
+    // This CANNOT be done as a graph-level ggml_mul the way the WEIGHT scales are: a weight scale
+    // is linear in the output ((s*W)@x == s*(W@x)), but the activation scale has to shape the
+    // quantization grid BEFORE x is cast to FP4, so it must reach the kernel itself.
+    //
+    // No scale in the checkpoint => op_params stays 0 => the kernel keeps upstream behaviour.
+    // MoE expert input scales are shape {n_expert}, not a single per-tensor value, and are skipped.
+    {
+        int n_applied = 0;
+        auto stash_act_scale = [&n_applied](ggml_tensor * w, const ggml_tensor * s) {
+            if (!w || !s || w->type != GGML_TYPE_NVFP4) {
+                return;
+            }
+            float v = 0.0f;
+            ggml_backend_tensor_get(s, &v, 0, sizeof(v));
+            if (!std::isfinite(v) || v <= 0.0f) {
+                return;
+            }
+            memcpy(&w->op_params[0], &v, sizeof(v));
+            n_applied++;
+        };
+
+        for (auto & layer : layers) {
+            stash_act_scale(layer.wq,             layer.wq_in_s);
+            stash_act_scale(layer.wk,             layer.wk_in_s);
+            stash_act_scale(layer.wv,             layer.wv_in_s);
+            stash_act_scale(layer.wo,             layer.wo_in_s);
+            stash_act_scale(layer.wqkv,           layer.wqkv_in_s);
+            stash_act_scale(layer.wqkv_gate,      layer.wqkv_gate_in_s);
+            stash_act_scale(layer.ffn_gate,       layer.ffn_gate_in_s);
+            stash_act_scale(layer.ffn_down,       layer.ffn_down_in_s);
+            stash_act_scale(layer.ffn_up,         layer.ffn_up_in_s);
+            stash_act_scale(layer.ffn_gate_shexp, layer.ffn_gate_shexp_in_s);
+            stash_act_scale(layer.ffn_down_shexp, layer.ffn_down_shexp_in_s);
+            stash_act_scale(layer.ffn_up_shexp,   layer.ffn_up_shexp_in_s);
+            stash_act_scale(layer.ssm_in,         layer.ssm_in_in_s);
+            stash_act_scale(layer.ssm_out,        layer.ssm_out_in_s);
+            stash_act_scale(layer.ssm_alpha,      layer.ssm_alpha_in_s);
+            stash_act_scale(layer.ssm_beta,       layer.ssm_beta_in_s);
+            stash_act_scale(layer.nextn.eh_proj,  layer.nextn.eh_proj_in_s);
+        }
+
+        LLAMA_LOG_INFO("%s: NVFP4 calibrated activation input_scale applied to %d tensor(s)\n",
+                       __func__, n_applied);
+    }
+
     return true;
 }
 

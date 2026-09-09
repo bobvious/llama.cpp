@@ -4,6 +4,16 @@
 #include "mmq.cuh"
 
 #include <cstdint>
+#include <cstring>
+
+// Calibrated NVFP4 level-2 (per-tensor) ACTIVATION scale, stashed on the weight tensor's
+// otherwise-unused op_params at load time. 0 => the checkpoint carried none; the kernel then
+// falls back to the runtime per-row amax (upstream behaviour).
+static inline float ggml_cuda_nvfp4_act_scale(const ggml_tensor * w) {
+    float s = 0.0f;
+    memcpy(&s, &w->op_params[0], sizeof(float));
+    return s > 0.0f ? s : 0.0f;
+}
 
 #define CUDA_QUANTIZE_BLOCK_SIZE     256
 #define CUDA_QUANTIZE_BLOCK_SIZE_MMQ 128
@@ -40,6 +50,7 @@ void quantize_mmq_fp4_cuda(const float *   x,
                              int64_t         ne1,
                              int64_t         ne2,
                              int64_t         ne3,
+                             float           input_scale,
                              cudaStream_t    stream);
 
 // quantize each token once and scatter the block to its compact rows (via the inverse map)
@@ -55,6 +66,7 @@ void quantize_scatter_mmq_fp4_cuda(const float *   x,
                                    int64_t         n_tokens,
                                    int64_t         nrows_dst,
                                    int             n_expert_used,
+                                   float           input_scale,
                                    cudaStream_t    stream);
 
 void quantize_scatter_mmq_q8_1_cuda(const float *   x,

@@ -128,7 +128,8 @@ template <bool scatter, bool use_aligned_float8>
 static __global__ void quantize_mmq_nvfp4(
         const float * __restrict__ x, const int32_t * __restrict__ ids, void * __restrict__ vy, float * __restrict__ scale,
         const int64_t ne00, const int64_t s01, const int64_t s02, const int64_t s03,
-        const int64_t ne0, const int64_t ne1, const int64_t ne2, const int n_expert_used) {
+        const int64_t ne0, const int64_t ne1, const int64_t ne2, const int n_expert_used,
+        const float input_scale) {
 #if defined(BLACKWELL_MMA_AVAILABLE)
 
     const int64_t blocks_per_col = (ne0 + QK_FP4_MMQ - 1) / QK_FP4_MMQ;
@@ -179,7 +180,11 @@ static __global__ void quantize_mmq_nvfp4(
         amax = threadIdx.x < int(CUDA_QUANTIZE_BLOCK_SIZE_MMQ / WARP_SIZE) ? warp_amax[lane] : 0.0f;
         amax = warp_reduce_max<WARP_SIZE>(amax);
         if (lane == 0) {
-            warp_amax[0] = amax / (6.0f * 448.0f);
+            // NVFP4 level-2 (per-tensor) activation scale. vLLM (scaled_fp4_quant) and SGLang
+            // (fp4_quantize) use the checkpoint's CALIBRATED input_scale here; deriving it from a
+            // runtime amax lets a single outlier token rescale the whole row. Fall back to the
+            // runtime value when the checkpoint carries no scale.
+            warp_amax[0] = input_scale > 0.0f ? input_scale : amax / (6.0f * 448.0f);
             if constexpr (scatter) {
 #pragma unroll
                 for (int slot = 0; slot < n_expert_used; ++slot) {
@@ -636,7 +641,8 @@ void quantize_scatter_mmq_q8_1_cuda(
 void quantize_scatter_mmq_fp4_cuda(
         const float * x, const int32_t * ids_src1_inv, void * vy, float * scale, const ggml_type type_src0, const bool use_aligned_float8,
         const int64_t ne00, const int64_t stride_token, const int64_t ne0,
-        const int64_t n_tokens, const int64_t nrows_dst, const int n_expert_used, cudaStream_t stream) {
+        const int64_t n_tokens, const int64_t nrows_dst, const int n_expert_used, const float input_scale,
+        cudaStream_t stream) {
     GGML_ASSERT(ne0 > 0);
     if (type_src0 == GGML_TYPE_NVFP4) {
         GGML_ASSERT(scale);
@@ -645,10 +651,10 @@ void quantize_scatter_mmq_fp4_cuda(
         const dim3 num_blocks(n_tokens, 1, 1);
         if (use_aligned_float8) {
             quantize_mmq_nvfp4<true, true><<<num_blocks, block_size, 0, stream>>>(
-                x, ids_src1_inv, vy, scale, ne00, /*s01=*/0, /*s02=*/stride_token, /*s03=*/0, ne0, /*ne1=*/nrows_dst, /*ne2=*/1, n_expert_used);
+                x, ids_src1_inv, vy, scale, ne00, /*s01=*/0, /*s02=*/stride_token, /*s03=*/0, ne0, /*ne1=*/nrows_dst, /*ne2=*/1, n_expert_used, input_scale);
         } else {
             quantize_mmq_nvfp4<true, false><<<num_blocks, block_size, 0, stream>>>(
-                x, ids_src1_inv, vy, scale, ne00, /*s01=*/0, /*s02=*/stride_token, /*s03=*/0, ne0, /*ne1=*/nrows_dst, /*ne2=*/1, n_expert_used);
+                x, ids_src1_inv, vy, scale, ne00, /*s01=*/0, /*s02=*/stride_token, /*s03=*/0, ne0, /*ne1=*/nrows_dst, /*ne2=*/1, n_expert_used, input_scale);
         }
     } else {
         GGML_ASSERT(type_src0 == GGML_TYPE_MXFP4);
@@ -665,7 +671,8 @@ void quantize_scatter_mmq_fp4_cuda(
 void quantize_mmq_fp4_cuda(
         const float * x, const int32_t * ids, void * vy, float * scale, const ggml_type type_src0, const bool use_aligned_float8,
         const int64_t ne00, const int64_t s01, const int64_t s02, const int64_t s03,
-        const int64_t ne0, const int64_t ne1, const int64_t ne2, const int64_t ne3, cudaStream_t stream) {
+        const int64_t ne0, const int64_t ne1, const int64_t ne2, const int64_t ne3, const float input_scale,
+        cudaStream_t stream) {
     GGML_ASSERT(type_src0 == GGML_TYPE_MXFP4 || type_src0 == GGML_TYPE_NVFP4);
     GGML_ASSERT(ne0 > 0);
 
@@ -676,10 +683,10 @@ void quantize_mmq_fp4_cuda(
         const dim3 num_blocks(ne1, ne2 * ne3, 1);
         if (use_aligned_float8) {
             quantize_mmq_nvfp4<false, true><<<num_blocks, block_size, 0, stream>>>(
-                x, ids, vy, scale, ne00, s01, s02, s03, ne0, ne1, ne2, /*n_expert_used=*/0);
+                x, ids, vy, scale, ne00, s01, s02, s03, ne0, ne1, ne2, /*n_expert_used=*/0, input_scale);
         } else {
             quantize_mmq_nvfp4<false, false><<<num_blocks, block_size, 0, stream>>>(
-                x, ids, vy, scale, ne00, s01, s02, s03, ne0, ne1, ne2, /*n_expert_used=*/0);
+                x, ids, vy, scale, ne00, s01, s02, s03, ne0, ne1, ne2, /*n_expert_used=*/0, input_scale);
         }
     } else {
         GGML_ASSERT(ne0 % (2 * QK_MXFP4) == 0);
