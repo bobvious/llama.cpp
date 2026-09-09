@@ -142,7 +142,7 @@ llama_model_muse_glimmer::graph::graph(const llama_model & model, const llm_grap
             cur = ggml_mul(ctx0, cur, gate);
             cb(cur, "attn_gated", il);
 
-            cur = build_lora_mm(model.layers[il].wo, cur, model.layers[il].wo_s);
+            cur = build_lora_mm(model.layers[il].wo, cur, model.layers[il].wo_s, model.layers[il].wo_in_s);
             cb(cur, "attn_o_proj", il);
         }
 

@@ -1698,7 +1698,7 @@ llm_graph_qkv llm_graph_context::build_qkv(
 
     if (layer.wqkv) {
         // fused QKV path
-        ggml_tensor * qkv = build_lora_mm(layer.wqkv, cur, layer.wqkv_s);
+        ggml_tensor * qkv = build_lora_mm(layer.wqkv, cur, layer.wqkv_s, layer.wqkv_in_s);
         cb(qkv, "wqkv", il);
         if (layer.wqkv_b) {
             qkv = ggml_add(ctx0, qkv, layer.wqkv_b);
@@ -1736,7 +1736,7 @@ llm_graph_qkv llm_graph_context::build_qkv(
         }
     } else {
         // separate Q/K/V path
-        Qcur = build_lora_mm(layer.wq, cur, layer.wq_s);
+        Qcur = build_lora_mm(layer.wq, cur, layer.wq_s, layer.wq_in_s);
         if (reshape) {
             cb(Qcur, "Qcur", il);
         }
@@ -1750,7 +1750,7 @@ llm_graph_qkv llm_graph_context::build_qkv(
             Qcur = ggml_clamp(ctx0, Qcur, -hparams.f_clamp_kqv, hparams.f_clamp_kqv);
             cb(Qcur, "Qcur_clamped", il);
         }
-        Kcur = build_lora_mm(layer.wk, cur, layer.wk_s);
+        Kcur = build_lora_mm(layer.wk, cur, layer.wk_s, layer.wk_in_s);
         if (reshape) {
             cb(Kcur, "Kcur", il);
         }
@@ -1764,7 +1764,7 @@ llm_graph_qkv llm_graph_context::build_qkv(
             Kcur = ggml_clamp(ctx0, Kcur, -hparams.f_clamp_kqv, hparams.f_clamp_kqv);
             cb(Kcur, "Kcur_clamped", il);
         }
-        Vcur = build_lora_mm(layer.wv, cur, layer.wv_s);
+        Vcur = build_lora_mm(layer.wv, cur, layer.wv_s, layer.wv_in_s);
         if (reshape) {
             cb(Vcur, "Vcur", il);
         }
