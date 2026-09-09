@@ -88,7 +88,15 @@ void ggml_cuda_nvfp4_trace_dispatch(
     st.any_scale_ever  |= scaled;
 
     // One line per DISTINCT (weight, path, scaled) triple. Repeats stay silent, so a
-    // long run is readable and a NEW behaviour mid-run is impossible to miss.
+    // long run stays readable and a NEW (weight, path, scaled) COMBINATION mid-run is loud.
+    // 🔴 BUT THE DEDUP KEY EXCLUDES THE VALUE, so each scale is read back EXACTLY ONCE, ever.
+    // A scale that is correct on its first dispatch and goes stale or garbage later is
+    // INVISIBLE to this instrument -- which is precisely astra-20260909-F4's scenario, and
+    // this comment used to say "a NEW behaviour mid-run is impossible to miss" without that
+    // exception. To close F4 the key would need the value in it (or a periodic re-read);
+    // deliberately not done, because it turns a once-per-tensor blocking D2H into a
+    // per-dispatch one. Until then, "the scale is live" is a statement about the FIRST
+    // dispatch of each tensor, not about the run.
     const std::string name = src0->name[0] ? src0->name : "<unnamed>";
     const std::string key  = name + "|" + nvfp4_path_name(path) + (scaled ? "|s" : "|-")
                            + (mul_mat_id ? "|id" : "");
@@ -124,7 +132,17 @@ void ggml_cuda_nvfp4_trace_dispatch(
             // agreement with the checkpoint: nothing here compares it to the exported
             // input_scale, so a stale positive still reads as a pass. (Astra F13.)
             st.n_value_ok++;
-            GGML_LOG_WARN("NVFP4-TRACE: %-40s %-15s SCALE VALUE OK (finite>0) value=%.9g%s\n",
+            // 🔴 THE SUBSTRING "CALIBRATED SCALE IN EFFECT" IS AN API. Three artifacts key on
+            // it literally: runs/nvfp4-trace-20260909/run-split.ps1:79 (it feeds the PASS gate),
+            // run-split-tensoronly.ps1:75, and runs/nvfp4-killswitch-20260909/compare.py:72 --
+            // the artifact behind the "260 calibrated vs 0" kill-switch headline. I renamed this
+            // to "SCALE VALUE OK" for honesty and swept the DLL for the NEW string, never for
+            // readers of the OLD one. All three would then have counted 0, silently, exit 0 --
+            // which reads as "the calibrated scale never reaches the kernel", the catastrophic
+            // finding this whole program exists to hunt. Restored, with the qualifier appended
+            // instead. To rename it, sweep by CONNECTION SITE and update all three in the same
+            // commit (memory/reference_sweep_by_connection_site_not_by_string.md).
+            GGML_LOG_WARN("NVFP4-TRACE: %-40s %-15s CALIBRATED SCALE IN EFFECT (value read back finite>0; NOT compared to the checkpoint) value=%.9g%s\n",
                           name.c_str(), nvfp4_path_name(path), v, mul_mat_id ? " (expert)" : "");
         }
     } else if (native) {

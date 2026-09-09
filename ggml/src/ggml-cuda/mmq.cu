@@ -151,15 +151,35 @@ void ggml_cuda_mul_mat_q(
     //   - dense NVFP4: ggml_cuda_should_use_mmvq returns ne11 <= MMVQ_MAX_BATCH_SIZE (8)
     //     via the Blackwell default (mmvq.cu:362-374), so ne11 < 8 goes to MMVQ and never
     //     enters MMQ at all. Stock decode is NOT affected.
-    //   - NVFP4 MUL_MAT_ID: get_mmvq_mmid_max_batch_turing_plus returns 8 for NVFP4
-    //     (mmvq.cu:185), so MoE broadcast also lands in MMVQ. Not affected either.
-    //   - MXFP4 MUL_MAT_ID: that same table returns 7 (mmvq.cu:184), so ne2 == 8 falls past
-    //     MMVQ into MMQ while the expert path probes with the raw ne11 (== 1 for broadcast,
-    //     :238 below). THIS is the stock-build hole -- gpt-oss-class MXFP4 MoE, not us.
+    //   - 🔴 MUL_MAT_ID (MoE) IS AFFECTED, AND AN EARLIER VERSION OF THIS COMMENT SAID IT WAS
+    //     NOT. get_mmvq_mmid_max_batch_turing_plus returns 8 for NVFP4 (mmvq.cu:185), which
+    //     covers ne2 <= 8 ONLY. Above that -- i.e. PREFILL and any batched MoE -- the MMVQ
+    //     block at ggml-cuda.cu:1925-1948 is skipped entirely and control reaches
+    //     ggml_cuda_should_use_mmq, which returns true for NVFP4 on anything with
+    //     turing_mma_available (:378). The expert path then probes with the RAW ne11 (:259
+    //     below), and ne11 == 1 for the gate/up broadcast by this file's own comment, so
+    //     J_max is 0 for essentially EVERY NVFP4 MoE MMQ call, at any batch size.
+    //     MXFP4 MoE is worse only in that its table returns 7 (mmvq.cu:184), so it starts
+    //     falling through one rung earlier, at ne2 == 8.
+    //     ⇒ Pre-fix NVFP4 MoE numbers are NOT exonerated. Dense prefill still is (its probe
+    //     sees the real ne11, which is the ubatch). The Muse Spark review said this in terms
+    //     -- "the MoE broadcast path makes this ALWAYS reachable" -- and I narrowed the radius
+    //     past its own words while citing it. Twice now on this same finding.
+    //     ⚠ Which BUILDS carry it is the separate question that bounds the damage: the defect
+    //     existed on this branch only between e504b6c9a and 52adc9dd6. Check a binary's commit
+    //     via /props before voiding any measurement (reference_props_endpoint_is_the_loaded_truth).
     //   - GGML_CUDA_NVFP4_NO_MMVQ=1: forces dense NVFP4 past MMVQ (mmvq.cu:346-348), so our
     //     OWN measurement instrument is what puts NVFP4 decode into the defective regime.
-    // Consequence for the record: this defect does not invalidate stock-path decode numbers;
-    // it invalidates any decode measured with NO_MMVQ (or FORCE_GENERIC) on a pre-fix build.
+    // Consequence for the record: this defect does not invalidate DENSE stock-path decode or
+    // dense prefill numbers. It invalidates (a) any decode measured with NO_MMVQ or
+    // FORCE_GENERIC and (b) any NVFP4 MoE number at all -- both only on a build in the
+    // e504b6c9a..52adc9dd6 window.
+    //
+    // STILL OPEN from that same review, and not done here: GGML_ASSERT(J_max > 0) whenever MMQ
+    // is selected; a regression test at ne11 == 1 for decode and MoE broadcast; and reconciling
+    // the probe input (ne11, :259) with the launcher input (ncols_max, :281). The expression
+    // above no longer probes, so none of these is load-bearing TODAY -- they are what would
+    // stop the next hand-resolved conflict from reintroducing it.
     //
     // PROVENANCE. Raised by the Muse Spark review as its Finding 1 on 2026-09-08 20:23 --
     // seventeen hours BEFORE e504b6c9a cherry-picked the defect in. It was re-found by the
