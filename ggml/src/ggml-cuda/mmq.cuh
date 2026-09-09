@@ -690,11 +690,21 @@ static constexpr __device__ ggml_cuda_mmq_util_funcs ggml_cuda_mmq_get_util_func
                 ggml_cuda_mmq_vec_dot_fp4_fp4_mma<type, J, fallback>,
                 ggml_cuda_mmq_write_back_mma<type, J, fallback>);
         case GGML_TYPE_NVFP4:
-            return ggml_cuda_mmq_util_funcs(
-                -1,
-                ggml_cuda_mmq_load_tiles_nvfp4_nvfp4<type, J, fallback>,
-                ggml_cuda_mmq_vec_dot_fp4_fp4_mma<type, J, fallback>,
-                ggml_cuda_mmq_write_back_mma<type, J, fallback>);
+            // Take the native FP4 loader/dot pair ONLY if the effective config actually
+            // selected the FP4 SRAM layout. Under GGML_CUDA_NVFP4_FORCE_GENERIC the config
+            // falls through to the Ampere NVFP4 rows while BLACKWELL_MMA_AVAILABLE is still
+            // defined, and this pair would then be geometrically wrong: the native loader
+            // writes packed FP4 + packed UE4M3 scales at a 76-word row stride, where the
+            // generic dot expects 84 words and four float D4 scales. Derive from the
+            // LAYOUT, never from the architecture macro.
+            if constexpr (ggml_cuda_mmq_get_sram_layout(type, J, fallback) == GGML_CUDA_MMQ_SRAM_LAYOUT_FP4) {
+                return ggml_cuda_mmq_util_funcs(
+                    -1,
+                    ggml_cuda_mmq_load_tiles_nvfp4_nvfp4<type, J, fallback>,
+                    ggml_cuda_mmq_vec_dot_fp4_fp4_mma<type, J, fallback>,
+                    ggml_cuda_mmq_write_back_mma<type, J, fallback>);
+            }
+            break;
         default:
             break;
     }
@@ -885,12 +895,22 @@ static __device__ __forceinline__ void mul_mat_q_process_tile(
     int * tile_y = data_mul_mat_q + J;
     int * tile_x = tile_y + GGML_PAD(J*MMQ_TILE_Y_K, nwarps*warp_size);
 
-#if defined(BLACKWELL_MMA_AVAILABLE)
-    // FP4 tile stores 8 blocks
-    constexpr int ne_block = (type == GGML_TYPE_MXFP4 || type == GGML_TYPE_NVFP4) ? QK_FP4_MMQ : QK8_1_MMQ;
-#else
-    constexpr int ne_block = QK8_1_MMQ;
-#endif  // defined(BLACKWELL_MMA_AVAILABLE)
+    // LOGICAL activation values per physical block: 256 for FP4, 128 for q8_1. (The
+    // PHYSICAL block is 144 bytes in both -- statically asserted at mmq.cuh:56 -- which is
+    // why only this divisor differs.)
+    //
+    // 🔴 This MUST follow the effective SRAM layout, not the architecture macro. Under
+    // GGML_CUDA_NVFP4_FORCE_GENERIC the config selects the Ampere NVFP4 rows (q8_1
+    // activations) while BLACKWELL_MMA_AVAILABLE is still defined, so the old macro test
+    // yielded 256 where the q8_1 path needs 128. Successive K iterations would then read
+    // activation block pairs 0/1, 1/2, 2/3 instead of 0/1, 2/3, 4/5 -- wrong from the
+    // SECOND iteration (a one-iteration test misses it), and wrong immediately for
+    // stream-K partitions starting at nonzero K. (Astra audit, Finding 1.)
+    //
+    // Equivalent to the old macro test on every other architecture: SRAM_LAYOUT_FP4 is
+    // used ONLY by the Blackwell config table.
+    constexpr int ne_block = ggml_cuda_mmq_get_sram_layout(type, J, fallback) == GGML_CUDA_MMQ_SRAM_LAYOUT_FP4
+        ? QK_FP4_MMQ : QK8_1_MMQ;
 
     constexpr int ITER_K          = ggml_cuda_mmq_get_K_vram(type, J, fallback);
     constexpr int blocks_per_iter = ITER_K / qk;

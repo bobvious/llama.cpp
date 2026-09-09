@@ -129,7 +129,17 @@ void ggml_cuda_mul_mat_q(
 
     const bool fallback = ne01 % 128 != 0;
 
-    const bool use_native_fp4 = blackwell_mma_available(cc) && (src0->type == GGML_TYPE_MXFP4 || src0->type == GGML_TYPE_NVFP4);
+    // Host activation format MUST be read out of the same config table the device kernel
+    // compiles against, or the two disagree and the mismatch is silent: it still links and
+    // still runs. Under GGML_CUDA_NVFP4_FORCE_GENERIC this returns false for NVFP4 (the
+    // Ampere rows carry SRAM_LAYOUT_NVFP4), so the q8_1 quantizer is selected, no scale
+    // array is allocated, and src1_scale.ptr stays null on BOTH the ordinary and the
+    // routed-expert paths -- which is exactly the invariant the write-back null guards
+    // rely on. Equivalent to the previous blackwell_mma_available() test otherwise, since
+    // SRAM_LAYOUT_FP4 appears only in the Blackwell table.
+    const bool use_native_fp4 = ggml_cuda_mmq_get_sram_layout(
+        src0->type, ggml_cuda_mmq_get_J_max(src0->type, fallback, cc, ne11), fallback, cc)
+        == GGML_CUDA_MMQ_SRAM_LAYOUT_FP4;
 
     // Trace here, not at the ggml-cuda.cu dispatch site: `use_native_fp4` is what decides
     // whether the calibrated activation scale is consulted at all, and it is only known
