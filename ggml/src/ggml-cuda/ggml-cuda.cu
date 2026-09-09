@@ -30,6 +30,7 @@
 #include "ggml-cuda/im2col.cuh"
 #include "ggml-cuda/mmf.cuh"
 #include "ggml-cuda/mmq.cuh"
+#include "ggml-cuda/nvfp4-trace.cuh"
 #include "ggml-cuda/mmvf.cuh"
 #include "ggml-cuda/mmvq.cuh"
 #include "ggml-cuda/moe-weighted-reduction.cuh"
@@ -1826,6 +1827,9 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
     const bool bad_padding_clear = ggml_backend_buffer_get_usage(src0->buffer) == GGML_BACKEND_BUFFER_USAGE_COMPUTE
         && ggml_nbytes(src0) != ggml_backend_buffer_get_alloc_size(src0->buffer, src0) && src0->view_src;
     if (bad_padding_clear || src1->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32) {
+        if (ggml_cuda_nvfp4_trace_enabled()) {
+            ggml_cuda_nvfp4_trace_dispatch(dst, GGML_CUDA_NVFP4_PATH_CUBLAS, false);
+        }
         ggml_cuda_mul_mat_cublas(ctx, src0, src1, dst);
         return;
     }
@@ -1854,10 +1858,16 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
         return;
     }
     if (ggml_cuda_should_use_mmf(src0->type, cc, warp_size, src0->ne, src0->nb, ne11, /*mul_mat_id =*/ false)) {
+        if (ggml_cuda_nvfp4_trace_enabled()) {
+            ggml_cuda_nvfp4_trace_dispatch(dst, GGML_CUDA_NVFP4_PATH_MMF, false);
+        }
         ggml_cuda_mul_mat_f(ctx, src0, src1, nullptr, dst);
         return;
     }
     if (ggml_cuda_should_use_mmvq(src0->type, cc, ne11)) {
+        if (ggml_cuda_nvfp4_trace_enabled()) {
+            ggml_cuda_nvfp4_trace_dispatch(dst, GGML_CUDA_NVFP4_PATH_MMVQ, false);
+        }
         ggml_cuda_mul_mat_vec_q(ctx, src0, src1, nullptr, dst);
         return;
     }
@@ -1865,6 +1875,9 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
         ggml_cuda_mul_mat_q(ctx, src0, src1, nullptr, dst);
         return;
     }
+        if (ggml_cuda_nvfp4_trace_enabled()) {
+            ggml_cuda_nvfp4_trace_dispatch(dst, GGML_CUDA_NVFP4_PATH_CUBLAS, false);
+        }
     ggml_cuda_mul_mat_cublas(ctx, src0, src1, dst);
 }
 
@@ -1918,6 +1931,9 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
             if (ggml_is_quantized(src0->type)) {
                 const int mmvq_mmid_max = get_mmvq_mmid_max_batch(src0->type, cc);
                 if (ne2 <= mmvq_mmid_max) {
+                    if (ggml_cuda_nvfp4_trace_enabled()) {
+                        ggml_cuda_nvfp4_trace_dispatch(dst, GGML_CUDA_NVFP4_PATH_MMVQ, true);
+                    }
                     ggml_cuda_mul_mat_vec_q(ctx, src0, src1, ids, dst);
                     return;
                 }
@@ -1935,6 +1951,9 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
         }
 
         if (ggml_cuda_should_use_mmf(src0->type, cc, WARP_SIZE, src0->ne, src0->nb, src1->ne[2], /*mul_mat_id=*/true)) {
+            if (ggml_cuda_nvfp4_trace_enabled()) {
+                ggml_cuda_nvfp4_trace_dispatch(dst, GGML_CUDA_NVFP4_PATH_MMF, true);
+            }
             ggml_cuda_mul_mat_f(ctx, src0, src1, ids, dst);
             return;
         }
@@ -4413,6 +4432,9 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
     ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *) backend->context;
 
     ggml_cuda_set_device(cuda_ctx->device);
+
+    // count NVFP4 matmuls that still carry a scale AFTER the scheduler split the graph
+    ggml_cuda_nvfp4_trace_graph(cgraph);
 
     bool use_cuda_graph             = false;
     bool cuda_graph_update_required = false;

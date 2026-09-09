@@ -7,7 +7,7 @@
 
 // Calibrated NVFP4 level-2 (per-tensor) ACTIVATION scale.
 //
-// 🔴 CARRIED AS A REAL GRAPH SOURCE (mul_mat src[2]), NOT as tensor metadata. An earlier
+// 🔴 CARRIED AS A REAL GRAPH SOURCE (mul_mat src[3]), NOT as tensor metadata. An earlier
 // version of this patch stashed it in the weight's op_params; a GPT-6 Astra review found three
 // independent ways that silently fails, all verified in-tree:
 //   * ggml_dup_tensor() inits op_params={0} (ggml.c:1815) and ggml_dup_tensor_layout copies

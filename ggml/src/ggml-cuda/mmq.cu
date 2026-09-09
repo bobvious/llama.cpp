@@ -2,6 +2,7 @@
 #include "mmq.cuh"
 #include "quantize.cuh"
 #include "mmid.cuh"
+#include "nvfp4-trace.cuh"
 
 #include <cstdint>
 
@@ -129,6 +130,16 @@ void ggml_cuda_mul_mat_q(
     const bool fallback = ne01 % 128 != 0;
 
     const bool use_native_fp4 = blackwell_mma_available(cc) && (src0->type == GGML_TYPE_MXFP4 || src0->type == GGML_TYPE_NVFP4);
+
+    // Trace here, not at the ggml-cuda.cu dispatch site: `use_native_fp4` is what decides
+    // whether the calibrated activation scale is consulted at all, and it is only known
+    // once we are inside MMQ. Compiles to one cached branch when the trace is off.
+    if (ggml_cuda_nvfp4_trace_enabled()) {
+        ggml_cuda_nvfp4_trace_dispatch(
+                dst,
+                use_native_fp4 ? GGML_CUDA_NVFP4_PATH_MMQ_NATIVE : GGML_CUDA_NVFP4_PATH_MMQ_Q8,
+                ids != nullptr);
+    }
     const size_t y_block_size       = use_native_fp4 ? sizeof(block_fp4_mmq) : sizeof(block_q8_1_mmq);
     const size_t y_values_per_block = use_native_fp4 ? QK_FP4_MMQ            : QK8_1_MMQ;
 

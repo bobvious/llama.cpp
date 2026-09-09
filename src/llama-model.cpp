@@ -1849,6 +1849,34 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
         }
     }
 
+    // NVFP4 activation-scale trace: report how many calibrated input_scale sidecars this
+    // checkpoint actually carries. This is the number the CUDA-side post-scheduler count
+    // must be compared against; either number alone proves nothing, and the gap between
+    // them is exactly a carrier dropped by an offload copy, a tensor-split snapshot or a
+    // view. Gated so a normal load stays silent.
+    if (getenv("GGML_CUDA_NVFP4_TRACE")) {
+        int n_in_s = 0;
+        for (const auto & l : layers) {
+            const ggml_tensor * cand[] = {
+                l.wq_in_s, l.wk_in_s, l.wv_in_s, l.wo_in_s, l.wqkv_in_s, l.wqkv_gate_in_s,
+                l.ffn_gate_in_s, l.ffn_up_in_s, l.ffn_down_in_s,
+                l.ffn_gate_exps_in_s, l.ffn_down_exps_in_s, l.ffn_up_exps_in_s,
+                l.ffn_gate_shexp_in_s, l.ffn_up_shexp_in_s, l.ffn_down_shexp_in_s,
+                l.ssm_in_in_s, l.ssm_out_in_s, l.ssm_alpha_in_s, l.ssm_beta_in_s,
+            };
+            for (const ggml_tensor * t : cand) {
+                n_in_s += t != nullptr ? 1 : 0;
+            }
+        }
+        n_in_s += output_in_s != nullptr ? 1 : 0;
+        LLAMA_LOG_WARN("%s: NVFP4-TRACE: checkpoint carries %d calibrated activation input_scale tensor(s)\n",
+                       __func__, n_in_s);
+        if (n_in_s > 0) {
+            LLAMA_LOG_WARN("%s: NVFP4-TRACE: compare this with the per-graph count logged by the CUDA "
+                           "backend. A LOWER count there means the carrier was dropped.\n", __func__);
+        }
+    }
+
     return true;
 }
 
