@@ -1,8 +1,10 @@
 #include "nvfp4-trace.cuh"
 #include "quantize.cuh"
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <mutex>
 #include <set>
 #include <string>
@@ -85,8 +87,30 @@ void ggml_cuda_nvfp4_trace_dispatch(
     }
 
     if (native && scaled) {
-        GGML_LOG_WARN("NVFP4-TRACE: %-40s %-15s CALIBRATED SCALE IN EFFECT%s\n",
-                      name.c_str(), nvfp4_path_name(path), mul_mat_id ? " (expert)" : "");
+        // 🔴 READ THE VALUE BACK, not just the pointer. The accessor validates F32 / 1 element /
+        // non-null data and NOTHING about the number, but all three carrier defects Astra found
+        // were silent VALUE corruption (a zeroed copy, a stale snapshot, a view's byte offset
+        // reinterpreted as a float). Without this, "the scale reached the kernel" is equally
+        // consistent with every scale being 0.0, and every placement-matrix PASS is vacuous.
+        //
+        // Blocking 4-byte D2H, once per distinct tensor because of the dedup above, and only
+        // when the trace is enabled. Cost is irrelevant next to what it rules out.
+        const float * dptr = ggml_cuda_nvfp4_act_scale_ptr(dst);
+        float v = std::numeric_limits<float>::quiet_NaN();
+        const cudaError_t err = cudaMemcpy(&v, dptr, sizeof(float), cudaMemcpyDeviceToHost);
+
+        if (err != cudaSuccess) {
+            GGML_LOG_WARN("NVFP4-TRACE: %-40s %-15s scale READBACK FAILED: %s\n",
+                          name.c_str(), nvfp4_path_name(path), cudaGetErrorString(err));
+        } else if (!std::isfinite(v) || v <= 0.0f) {
+            // A pointer that survives every placement but carries garbage is the exact failure
+            // the pointer-only check cannot see. Loud on purpose.
+            GGML_LOG_WARN("NVFP4-TRACE: %-40s %-15s 🔴 SCALE VALUE IS BAD: %.9g%s\n",
+                          name.c_str(), nvfp4_path_name(path), v, mul_mat_id ? " (expert)" : "");
+        } else {
+            GGML_LOG_WARN("NVFP4-TRACE: %-40s %-15s CALIBRATED SCALE IN EFFECT value=%.9g%s\n",
+                          name.c_str(), nvfp4_path_name(path), v, mul_mat_id ? " (expert)" : "");
+        }
     } else if (native) {
         // Reached the modified quantizer with no scale. Expected for an uncalibrated
         // checkpoint; a RED FLAG once anything in this process has carried one, because
