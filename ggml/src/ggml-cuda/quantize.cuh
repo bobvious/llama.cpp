@@ -4,6 +4,7 @@
 #include "mmq.cuh"
 
 #include <cstdint>
+#include <cstdlib>
 
 // Calibrated NVFP4 level-2 (per-tensor) ACTIVATION scale.
 //
@@ -24,7 +25,22 @@
 // or nullptr when the checkpoint had none (=> kernel keeps the runtime-amax behaviour).
 // NOTE src[3]: src[2] is the `ids` operand of GGML_MUL_MAT_ID and is read as such by the CUDA
 // dispatch (ggml-cuda.cu:1905), so the scale cannot live there. See llama-graph.cpp.
+// KILL-SWITCH: GGML_CUDA_NVFP4_NO_ACT_SCALE=1 makes every call return nullptr, forcing the
+// runtime-amax path exactly as if the checkpoint carried no calibration. This is the CONTROL for
+// "does the calibrated scale change any OUTPUT?" -- same build, same argv, one env var apart.
+// Read once per process (getenv is not cheap and this is on the dispatch path).
+static inline bool ggml_cuda_nvfp4_act_scale_disabled() {
+    static const bool disabled = [] {
+        const char * e = getenv("GGML_CUDA_NVFP4_NO_ACT_SCALE");
+        return e != nullptr && *e != 0 && *e != '0';
+    }();
+    return disabled;
+}
+
 static inline const float * ggml_cuda_nvfp4_act_scale_ptr(const ggml_tensor * dst) {
+    if (ggml_cuda_nvfp4_act_scale_disabled()) {
+        return nullptr;
+    }
     const ggml_tensor * s = dst->src[3];
     if (s == nullptr || s->type != GGML_TYPE_F32 || ggml_nelements(s) != 1 || s->data == nullptr) {
         return nullptr;
