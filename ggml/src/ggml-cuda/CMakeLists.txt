@@ -112,6 +112,26 @@ if (CUDAToolkit_FOUND)
     file(GLOB   SRCS "template-instances/mmf*.cu")
     list(APPEND GGML_SOURCES_CUDA ${SRCS})
 
+    # W4A8 NVFP4 MEASUREMENT ARM. OFF by default; never ship it on.
+    #
+    # 🔴 add_compile_definitions() is deliberate and load-bearing: it applies to EVERY
+    # source in this directory, including the ~120 generated template-instances/mmq*.cu
+    # globbed just above, which is where the mul_mat_q kernels are actually instantiated.
+    # The host probe lives in mmq.cu and the device config in mmq.cuh; if the macro
+    # reached one translation unit and not another, the host would size and select q8_1
+    # while the device ran FP4 -- and since shared-memory sizing is config-dependent
+    # (FP4 stride 76 vs NVFP4 stride 84 int32 words, mmq.cuh:144-147), that is an
+    # out-of-bounds shared-memory access, not merely wrong logits.
+    #
+    # The original commit defined this macro NOWHERE -- no -D, no CMake, nothing -- so the
+    # single-source-of-truth claim held only within one TU. (Muse Spark review 2026-09-09,
+    # Finding 2.) Mirrors the GGML_CUDA_FA_ALL_QUANTS pattern directly below.
+    option(GGML_CUDA_NVFP4_FORCE_GENERIC "ggml: run NVFP4 as W4A8 (generic q8_1 activations) on Blackwell -- MEASUREMENT ARM, not for release builds" OFF)
+    if (GGML_CUDA_NVFP4_FORCE_GENERIC)
+        add_compile_definitions(GGML_CUDA_NVFP4_FORCE_GENERIC)
+        message(WARNING "GGML_CUDA_NVFP4_FORCE_GENERIC=ON: NVFP4 will run W4A8 (q8_1 activations), NOT the native FP4 path. This is a measurement build -- do not ship or benchmark it as prod.")
+    endif()
+
     if (GGML_CUDA_FA_ALL_QUANTS)
         file(GLOB   SRCS "template-instances/fattn-vec*.cu")
         list(APPEND GGML_SOURCES_CUDA ${SRCS})
