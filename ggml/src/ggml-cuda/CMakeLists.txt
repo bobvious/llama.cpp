@@ -124,6 +124,31 @@ if (CUDAToolkit_FOUND)
             template-instances/fattn-vec-instance-bf16-bf16.cu)
     endif()
 
+    # W4A8 NVFP4 MEASUREMENT ARM. OFF by default; never ship it on.
+    #
+    # 🔴 add_compile_definitions() is deliberate and load-bearing: it applies to EVERY
+    # source in this directory, including the ~120 generated template-instances/mmq*.cu
+    # globbed above, which is where the mul_mat_q kernels are actually instantiated.
+    # The host probe lives in mmq.cu and the device config in mmq.cuh; if the macro
+    # reached one translation unit and not another, the host would size and select q8_1
+    # while the device ran FP4 -- and since shared-memory sizing is config-dependent
+    # (FP4 stride 76 vs NVFP4 stride 84 int32 words), that is an out-of-bounds shared-memory
+    # access, not merely wrong logits.
+    #
+    # 🔴 THIS BLOCK WAS LEFT BEHIND BY THE CHERRY-PICK OF fc5e3e0c6 AND THE OMISSION WAS
+    # SILENT. That commit carries only the three .cu/.cuh files; the switch that enables them
+    # lives in a later commit on nvfp4/w4a8-arm. Configuring with an undefined
+    # -DGGML_CUDA_NVFP4_FORCE_GENERIC=ON is NOT an error in CMake -- it sets an unused cache
+    # entry, the macro is never defined, and the build completes as an ordinary W4A4 binary
+    # wearing a w4a8 build-dir name. Caught 2026-09-09 only because the ported build was
+    # re-scored against a pre-registered number and returned 1.444125, the W4A4 value, to the
+    # digit. Verify the EFFECT, never the successful build.
+    option(GGML_CUDA_NVFP4_FORCE_GENERIC "ggml: run NVFP4 as W4A8 (generic q8_1 activations) on Blackwell -- MEASUREMENT ARM, not for release builds" OFF)
+    if (GGML_CUDA_NVFP4_FORCE_GENERIC)
+        add_compile_definitions(GGML_CUDA_NVFP4_FORCE_GENERIC)
+        message(WARNING "GGML_CUDA_NVFP4_FORCE_GENERIC=ON: NVFP4 will run W4A8 (q8_1 activations), NOT the native FP4 path. This is a measurement build -- do not ship or benchmark it as prod.")
+    endif()
+
     ggml_add_backend_library(ggml-cuda
                              ${GGML_HEADERS_CUDA}
                              ${GGML_SOURCES_CUDA}

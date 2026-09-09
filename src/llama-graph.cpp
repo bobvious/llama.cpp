@@ -1533,7 +1533,15 @@ ggml_tensor * llm_graph_context::build_lora_mm(
     // GGML_ASSERT(!ids || ids->type == GGML_TYPE_I32) in mmvq.cu on the first decode token.
     // Measured, not theorised: it aborted immediately on Glimmer. A hole at src[2] is fine;
     // graph traversal walks the full GGML_MAX_SRC range (ggml.c:7221).
-    if (w_in_s) {
+    // 🔴 GATE ON THE WEIGHT TYPE. The activation scale is meaningful ONLY for an NVFP4 weight:
+    // the CUDA kernel reads src[3] exclusively on the native FP4 path and ignores it everywhere
+    // else, so attaching it to a non-NVFP4 matmul is numerically harmless -- and that is exactly
+    // why it went unnoticed. The damage is to the DETECTOR: this attach count is one half of the
+    // carrier check (attached-at-graph-build vs seen-at-kernel), and inflating it with matmuls
+    // the kernel will never consult makes a genuine carrier loss look like normal slack.
+    // Found by the Glimmer review lane 2026-09-09 (ROADMAP P5) and verified: there was no type
+    // check at all.
+    if (w_in_s && w && w->type == GGML_TYPE_NVFP4) {
         res->src[3] = w_in_s;
 
         // NVFP4-TRACE attach side. The CUDA backend counts how many NVFP4 matmuls carry a scale
