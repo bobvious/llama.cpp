@@ -129,17 +129,29 @@ void ggml_cuda_mul_mat_q(
 
     const bool fallback = ne01 % 128 != 0;
 
-    // Host activation format MUST be read out of the same config table the device kernel
-    // compiles against, or the two disagree and the mismatch is silent: it still links and
-    // still runs. Under GGML_CUDA_NVFP4_FORCE_GENERIC this returns false for NVFP4 (the
-    // Ampere rows carry SRAM_LAYOUT_NVFP4), so the q8_1 quantizer is selected, no scale
-    // array is allocated, and src1_scale.ptr stays null on BOTH the ordinary and the
-    // routed-expert paths -- which is exactly the invariant the write-back null guards
-    // rely on. Equivalent to the previous blackwell_mma_available() test otherwise, since
-    // SRAM_LAYOUT_FP4 appears only in the Blackwell table.
-    const bool use_native_fp4 = ggml_cuda_mmq_get_sram_layout(
-        src0->type, ggml_cuda_mmq_get_J_max(src0->type, fallback, cc, ne11), fallback, cc)
-        == GGML_CUDA_MMQ_SRAM_LAYOUT_FP4;
+    // Activation format. Under GGML_CUDA_NVFP4_FORCE_GENERIC, NVFP4 -- and ONLY NVFP4 --
+    // takes the generic q8_1 path; the SAME macro removes the native NVFP4 rows from the
+    // Blackwell config table, so host and device select the same thing by construction.
+    // With the macro off this is byte-for-byte the pre-patch expression, deliberately: the
+    // default build must not be able to regress.
+    //
+    // 🔴 DO NOT "derive" this by probing the config table via ggml_cuda_mmq_get_J_max().
+    // That was the first version of this patch and it was WRONG in the DEFAULT build:
+    // get_J_max computes ret = min(ne11,512); ret -= ret % 8 (mmq.cuh:366-375), so it
+    // returns 0 for every ne11 < 8. J=0 matches no row, and the table's fallthrough
+    // sentinel (mmq-config-ampere.cuh:382) reports SRAM_LAYOUT_Q8_0 -- making the probe
+    // false for EVERY single-token decode, and for MoE broadcast (ne11==1), while the
+    // device still launches a J>=8 kernel that uses the native FP4 loader/dot pair. Host
+    // packs q8_1, device reads FP4: wrong numbers from the first K iteration, and it
+    // links and runs. Shared memory happens not to fault only because the FP4 and Q8_1
+    // strides are equal by static_assert (mmq.cuh:161).
+    // Found by the Muse Spark review, 2026-09-09, Finding 1.
+    bool use_native_fp4 = blackwell_mma_available(cc) && (src0->type == GGML_TYPE_MXFP4 || src0->type == GGML_TYPE_NVFP4);
+#ifdef GGML_CUDA_NVFP4_FORCE_GENERIC
+    if (src0->type == GGML_TYPE_NVFP4) {
+        use_native_fp4 = false;
+    }
+#endif // GGML_CUDA_NVFP4_FORCE_GENERIC
 
     // Trace here, not at the ggml-cuda.cu dispatch site: `use_native_fp4` is what decides
     // whether the calibrated activation scale is consulted at all, and it is only known
@@ -269,7 +281,14 @@ void ggml_cuda_mul_mat_q(
     // Note that ne02 is used instead of ne12 because the number of y channels determines the z dimension of the CUDA grid.
     const mmq_args args = {
         src0_d, src0->type, (const int *) src1_q8_1.get(), ids_dst.get(), expert_bounds.get(), dst_d,
-        src1_scale.ptr,
+        // Mirror the ordinary path's ternary (see the non-ids branch above) instead of
+        // relying on an un-allocated ggml_cuda_pool_alloc<float> defaulting to nullptr.
+        // The device-side y_scale guards are all "pointer != nullptr", so nullness is the
+        // invariant that keeps the generic path from scaling its results by garbage --
+        // and an invariant worth that much should be stated here, not inherited from an
+        // allocator's default. (Muse Spark review, Finding 3: it could not verify that
+        // default from the tree.)
+        src0->type == GGML_TYPE_NVFP4 && use_native_fp4 ? src1_scale.ptr : nullptr,
         ne00, ne01, ne_get_rows, s01, ne_get_rows, s1,
         ne02, ne02, s02, s12, s2,
         ne03, ne13, s03, s13, s3,
