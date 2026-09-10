@@ -1710,7 +1710,7 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
             by_name.emplace(nm, t);
         }
         const std::string suffix = ".input_scale";
-        size_t n_matched = 0, n_orphan = 0, n_skipped_type = 0;
+        size_t n_matched = 0, n_orphan = 0, n_skipped_type = 0, n_skipped_rank = 0;
         for (auto & [nm, t] : tensors_by_name) {
             if (nm.size() <= suffix.size() || nm.compare(nm.size() - suffix.size(), suffix.size(), suffix) != 0) {
                 continue;
@@ -1731,13 +1731,40 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
                 n_skipped_type++;
                 continue;
             }
+            if (ggml_nelements(t) != 1) {
+                // 🔴 THE KERNEL READS A SCALAR: quantize.cu does `*input_scale`, one
+                // dereference. A per-expert sidecar (MoE checkpoints carry
+                // `blk.N.ffn_*_exps.input_scale` with ne = n_expert, e.g. 256 on
+                // Qwen3.6-35B-A3B) would contribute ONLY ELEMENT 0 -- expert 0's scale applied
+                // to every expert, silently, with no error and no wrong-looking output.
+                //
+                // This map is consulted today only by build_lora_mm (dense sites), so nothing
+                // reads these yet. That is exactly why the guard belongs HERE: wiring
+                // build_lora_mm_id is an open item, and without this check that one edit turns
+                // a coverage improvement into silent corruption that would read as
+                // "calibration hurts MoE".
+                //
+                // vLLM and SGLang both consume these PER EXPERT (a1_gscale/a2_gscale: [e]).
+                // Matching them needs a rank-aware carrier, not a wider map -- see
+                // benchmarks/runs/nvfp4-moe-parity-20260909/RESULTS.md. Until that exists,
+                // REFUSE rather than truncate.
+                n_skipped_rank++;
+                continue;
+            }
             nvfp4_act_scales.emplace(it->second, t);
             n_matched++;
         }
-        if (n_matched || n_orphan || n_skipped_type) {
+        if (n_matched || n_orphan || n_skipped_type || n_skipped_rank) {
             LLAMA_LOG_INFO("%s: NVFP4 activation scales: %zu mapped to NVFP4 weights"
-                           ", %zu skipped (weight not NVFP4), %zu orphaned (no matching .weight)"
-                           "\n", __func__, n_matched, n_skipped_type, n_orphan);
+                           ", %zu skipped (weight not NVFP4), %zu skipped (PER-EXPERT, kernel reads a scalar)"
+                           ", %zu orphaned (no matching .weight)"
+                           "\n", __func__, n_matched, n_skipped_type, n_skipped_rank, n_orphan);
+        }
+        if (n_skipped_rank) {
+            LLAMA_LOG_WARN("%s: %zu NVFP4 activation scales are PER-EXPERT and were REFUSED. "
+                           "vLLM/SGLang consume these per expert; our kernel reads a scalar, so using "
+                           "them would apply expert 0's scale to EVERY expert. This is a missing "
+                           "capability here, not a bad checkpoint.\n", __func__, n_skipped_rank);
         }
     }
 
