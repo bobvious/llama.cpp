@@ -1840,6 +1840,26 @@ static void kl_divergence(llama_context * ctx, const common_params & params) {
         LOG_ERR("%s: inconsistent vocabulary (%d vs %d)\n", __func__, n_vocab, llama_vocab_n_tokens(vocab));
     }
 
+    // --chunks IS INERT ON THIS PATH. n_chunk comes from the reference .dat HEADER, just above;
+    // params.n_chunks is never consulted here (unlike perplexity()/perplexity_v2(), which both do
+    // `params.n_chunks < 0 ? n_chunk_max : min(...)`). A `--chunks N` on a --kl-divergence command
+    // line therefore does NOTHING, silently, and the run still exits 0 with a plausible number.
+    //
+    // This cost the whole NVFP4 program its ability to trust a control: every reference file we
+    // built happened to match the N being passed, so the flag "worked" by luck for weeks and the
+    // discrepancy only surfaced when a smaller reference was reused. A knob that silently does
+    // nothing is worse than a missing knob -- it reads as a control that was applied.
+    // Documented in memory/reference_chunks_flag_inert_on_kldivergence.md; this is the guard that
+    // makes the documentation unnecessary. To run fewer chunks, BUILD A SMALLER REFERENCE.
+    if (params.n_chunks >= 0 && params.n_chunks != n_chunk) {
+        LOG_ERR("%s: --chunks %d IGNORED: this reference file fixes n_chunk = %d.\n",
+                __func__, params.n_chunks, n_chunk);
+        LOG_ERR("%s: --chunks does not apply to --kl-divergence; the chunk count is read from the\n"
+                "%s: reference .dat header. Re-run without --chunks, or build a %d-chunk reference.\n",
+                __func__, __func__, params.n_chunks);
+        return;
+    }
+
     std::vector<llama_token> tokens(size_t(n_ctx) * n_chunk);
     if (in.read((char *)tokens.data(), tokens.size()*sizeof(tokens[0])).fail()) {
         LOG_ERR("%s: failed reading evaluation tokens from %s\n", __func__, params.logits_file.c_str());
