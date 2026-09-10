@@ -1852,12 +1852,25 @@ static void kl_divergence(llama_context * ctx, const common_params & params) {
     // Documented in memory/reference_chunks_flag_inert_on_kldivergence.md; this is the guard that
     // makes the documentation unnecessary. To run fewer chunks, BUILD A SMALLER REFERENCE.
     if (params.n_chunks >= 0 && params.n_chunks != n_chunk) {
-        LOG_ERR("%s: --chunks %d IGNORED: this reference file fixes n_chunk = %d.\n",
-                __func__, params.n_chunks, n_chunk);
-        LOG_ERR("%s: --chunks does not apply to --kl-divergence; the chunk count is read from the\n"
+        // 🔴 fprintf(stderr), NOT LOG_ERR. common_log is buffered and drained by a worker thread;
+        // exit() below skips that drain, so LOG_ERR here produced the RIGHT exit code with NO
+        // message at all — measured: 7 lines of log and nothing about --chunks. A guard that
+        // fails silently is the defect it was written to fix, wearing the opposite mask.
+        // See memory/reference_diagnostic_on_droppable_log_path.md.
+        fprintf(stderr,
+                "\n%s: FATAL: --chunks %d IGNORED: this reference file fixes n_chunk = %d.\n"
+                "%s: --chunks does not apply to --kl-divergence; the chunk count is read from the\n"
                 "%s: reference .dat header. Re-run without --chunks, or build a %d-chunk reference.\n",
-                __func__, __func__, params.n_chunks);
-        return;
+                __func__, params.n_chunks, n_chunk, __func__, __func__, params.n_chunks);
+        fflush(stderr);
+        // 🔴 exit(1), NOT `return`. kl_divergence() is `static void` and main() falls through to
+        // `return 0` regardless, so a bare `return` here would PRINT TWO ERRORS AND EXIT 0 — and
+        // every script in D:\llm gates on $LASTEXITCODE. The first version of this guard did
+        // exactly that: a commit written to abolish a silent failure reintroduced one, and it was
+        // compile-checked but never RUN. See reference_success_shaped_failure_finish_reason.md.
+        // ⚠ The `in.fail()` / vocab-mismatch returns above share this defect and are NOT fixed
+        // here — they predate this change and are a separate, wider cleanup.
+        exit(1);
     }
 
     std::vector<llama_token> tokens(size_t(n_ctx) * n_chunk);
