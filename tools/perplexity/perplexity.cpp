@@ -14,6 +14,7 @@
 #include <cstring>
 #include <ctime>
 #include <fstream>
+#include <iomanip>
 #include <mutex>
 #include <random>
 #include <sstream>
@@ -186,6 +187,112 @@ struct kl_divergence_result {
     float  max_p_diff       = 0.0f;
     size_t n_same_top       = 0.0;
     size_t count            = 0.0;
+};
+
+// ---------------------------------------------------------------------------------------------
+// PER-CHUNK KLD EMIT (fork-local; ROADMAP-NVFP4.md 1g-1)
+//
+// WHY THIS EXISTS. kl_divergence() allocates ONE kl_divergence_result OUTSIDE the chunk loop, and
+// every console row is a CUMULATIVE running mean printed at 4-5 decimals. There is no per-chunk
+// output at all. On 2026-09-09 that made a decisive set of paired t-tests VOID: the "per-chunk"
+// values had been taken from those cumulative rows. A paired test needs the per-chunk
+// observations. This writes them at full precision to a machine-readable file and does not touch
+// the console output.
+//
+// Enabled ONLY when LLAMA_KLD_PER_CHUNK_OUT names a path. Off => no cost, no behaviour change.
+// Env var rather than a CLI flag deliberately: this is a fork-local instrument and it stays out
+// of the shared arg parser (memory/project_llamacpp_fork_not_upstream.md).
+//
+// SUMS, NOT JUST MEANS, ON PURPOSE: summing the per-chunk sums must reproduce the final
+// cumulative console numbers exactly, so the file checks itself without a second run.
+struct kld_per_chunk_writer {
+    std::ofstream out;
+    bool enabled = false;
+
+    // The header carries a Windows PATH. Emitting it raw produced an unescaped backslash, which
+    // is invalid JSON -- every reader failed on line 1 while the per-chunk rows below were
+    // perfectly good. Caught on the FIRST REAL RUN, not by the compiler and not by the build.
+    static std::string json_escape(const std::string & in) {
+        std::string o;
+        o.reserve(in.size() + 8);
+        for (char c : in) {
+            switch (c) {
+                case '\\': o += "\\\\"; break;
+                case '\"' : o += "\\\"";  break;
+                case '\n': o += "\\n";  break;
+                case '\r': o += "\\r";  break;
+                case '\t': o += "\\t";  break;
+                default:
+                    if ((unsigned char) c < 0x20) { o += ' '; } else { o += c; }
+            }
+        }
+        return o;
+    }
+
+    void open(const char * model_desc, int n_ctx_in, int n_chunk, const std::string & logits_file) {
+        const char * path = getenv("LLAMA_KLD_PER_CHUNK_OUT");
+        if (path == nullptr || *path == 0) {
+            return;
+        }
+        out.open(path);
+        if (!out) {
+            // FAIL LOUD. A silently-absent output file is indistinguishable from "this run had no
+            // per-chunk data" -- exactly the failure shape this patch exists to remove. The run
+            // continues (the console numbers are still valid) but nobody mistakes a missing file
+            // for a measurement.
+            LOG_ERR("%s: LLAMA_KLD_PER_CHUNK_OUT='%s' could not be opened for writing\n", __func__, path);
+            return;
+        }
+        enabled = true;
+        out << std::setprecision(17);
+        out << "{\"type\":\"header\",\"schema\":1"
+            << ",\"model\":\"" << json_escape(model_desc ? model_desc : "") << "\""
+            << ",\"base_logits_file\":\"" << json_escape(logits_file) << "\""
+            << ",\"n_ctx\":" << n_ctx_in
+            << ",\"n_chunk\":" << n_chunk
+            << "}\n";
+        LOG_INF("%s: per-chunk KLD -> %s\n", __func__, path);
+    }
+
+    // `before` is the accumulator snapshot taken immediately before this chunk's process_logits.
+    void write(int chunk_1based, const kl_divergence_result & before, const kl_divergence_result & after) {
+        if (!enabled) {
+            return;
+        }
+        const size_t n = after.count - before.count;
+        if (n == 0) {
+            return;
+        }
+        const double d_kld       = after.sum_kld          - before.sum_kld;
+        const double d_kld2      = after.sum_kld2         - before.sum_kld2;
+        const double d_nll       = after.sum_nll          - before.sum_nll;
+        const double d_nll2      = after.sum_nll2         - before.sum_nll2;
+        const double d_nll_base  = after.sum_nll_base     - before.sum_nll_base;
+        const double d_nll_base2 = after.sum_nll_base2    - before.sum_nll_base2;
+        const double d_cross     = after.sum_nll_nll_base - before.sum_nll_nll_base;
+        const double d_pdiff2    = after.sum_p_diff2      - before.sum_p_diff2;
+        const double d_pdiff4    = after.sum_p_diff4      - before.sum_p_diff4;
+        const size_t d_same_top  = after.n_same_top       - before.n_same_top;
+
+        out << "{\"chunk\":"            << chunk_1based
+            << ",\"n\":"                << n
+            << ",\"mean_kld\":"         << d_kld / n
+            << ",\"mean_nll\":"         << d_nll / n
+            << ",\"mean_nll_base\":"    << d_nll_base / n
+            << ",\"top1_same\":"        << d_same_top
+            << ",\"top1_frac\":"        << double(d_same_top) / double(n)
+            << ",\"sum_kld\":"          << d_kld
+            << ",\"sum_kld2\":"         << d_kld2
+            << ",\"sum_nll\":"          << d_nll
+            << ",\"sum_nll2\":"         << d_nll2
+            << ",\"sum_nll_base\":"     << d_nll_base
+            << ",\"sum_nll_base2\":"    << d_nll_base2
+            << ",\"sum_nll_nll_base\":" << d_cross
+            << ",\"sum_p_diff2\":"      << d_pdiff2
+            << ",\"sum_p_diff4\":"      << d_pdiff4
+            << "}\n";
+        out.flush();  // a killed run must still leave the chunks it finished
+    }
 };
 
 static std::pair<double, float> log_softmax(int n_vocab, const float * logits, const uint16_t * base_log_prob, int tok, kl_divergence_result & kld) {
@@ -1765,7 +1872,21 @@ static void kl_divergence(llama_context * ctx, const common_params & params) {
 
     LOG_INF("%s: computing over %d chunks, n_ctx=%u, batch_size=%d, n_seq=%d\n", __func__, n_chunk, n_ctx, n_batch, n_seq);
 
-    std::vector<std::thread> workers(std::thread::hardware_concurrency() - 1);
+    // 1g-1: the KLD worker pool is sized from hardware_concurrency() and IGNORES -t entirely.
+    // That matters for the A/A control: each worker accumulates a local kl_divergence_result and
+    // merges it under a mutex, so the MERGE ORDER is thread-completion order and the per-chunk
+    // sums differ in their last bits run to run. LLAMA_KLD_WORKERS=0 forces the whole reduction
+    // onto this thread, giving a deterministic order -- which is what makes "A/A returns exactly
+    // 0" a testable claim rather than an aspiration. It also ISOLATES the cause: if a difference
+    // SURVIVES LLAMA_KLD_WORKERS=0, it is the forward pass, not the reduction.
+    // I reached for `-t 1` first and it changed nothing, because -t does not reach here.
+    unsigned n_kld_workers = std::thread::hardware_concurrency() - 1;
+    if (const char * e = getenv("LLAMA_KLD_WORKERS")) {
+        n_kld_workers = (unsigned) atoi(e);
+        LOG_INF("%s: LLAMA_KLD_WORKERS=%u (default would be %u)\n",
+                __func__, n_kld_workers, std::thread::hardware_concurrency() - 1);
+    }
+    std::vector<std::thread> workers(n_kld_workers);
 
     auto mean_and_uncertainty = [] (double sum, double sum2, size_t count) {
         if (count < 1) {
@@ -1788,6 +1909,14 @@ static void kl_divergence(llama_context * ctx, const common_params & params) {
     kl_divergence_result kld;
     auto    kld_ptr =    kld_values.data();
     auto p_diff_ptr = p_diff_values.data();
+
+    // ROADMAP-NVFP4.md 1g-1. Off unless LLAMA_KLD_PER_CHUNK_OUT names a writable path.
+    kld_per_chunk_writer per_chunk;
+    {
+        char model_desc[256] = {0};
+        llama_model_desc(model, model_desc, sizeof(model_desc));
+        per_chunk.open(model_desc, (int) n_ctx, n_chunk, params.logits_file);
+    }
 
     const int first = n_ctx/2;
 
@@ -1868,10 +1997,17 @@ static void kl_divergence(llama_context * ctx, const common_params & params) {
 
             const float * all_logits = num_batches > 1 ? logits.data() : llama_get_logits_ith(ctx, seq*n_ctx + first);
 
+            // 1g-1: snapshot the ACCUMULATOR, then difference it. process_logits merges this
+            // chunk's tokens into the same running `kld` the console rows print, so the delta is
+            // this chunk's exact contribution -- no reconstruction, no rounding.
+            const kl_divergence_result kld_before = kld;
+
             process_logits(n_vocab, all_logits, tokens.data() + start + seq*n_ctx + first, n_ctx - 1 - first,
                     workers, log_probs_uint16, kld, kld_ptr, p_diff_ptr);
             p_diff_ptr += n_ctx - 1 - first;
             kld_ptr    += n_ctx - 1 - first;
+
+            per_chunk.write(i + seq + 1, kld_before, kld);
 
             LOG("%4d", i + seq + 1);
 
