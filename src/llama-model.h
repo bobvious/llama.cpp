@@ -703,6 +703,20 @@ struct llama_model {
     // for quantize-stats only
     std::vector<std::pair<std::string, struct ggml_tensor *>> tensors_by_name;
 
+    // NVFP4 calibrated activation scale, keyed by the WEIGHT it belongs to (ROADMAP-NVFP4 1g-3).
+    //
+    // Built once at load by NAME (`X.weight` -> `X.input_scale`), deliberately NOT from a
+    // hand-maintained list of layer fields. There are 20+ `*_in_s` fields on llama_layer and the
+    // roadmap already records what a hand-maintained enumeration costs: the "416 sidecars"
+    // denominator is one, and it silently omits the nextn scales. A name rule cannot go stale
+    // when a new role is added -- it covers that role the day its sidecar loads.
+    //
+    // Consumed by llm_graph_context::build_lora_mm as a FALLBACK when a call site did not pass
+    // the scale explicitly. That is what extends coverage past attention without touching every
+    // architecture's build_ffn call site, where a missed site fails SILENTLY (no error, just an
+    // uncalibrated matmul that looks exactly like a calibrated one).
+    std::unordered_map<const struct ggml_tensor *, struct ggml_tensor *> nvfp4_act_scales;
+
     // for keeping track of associated LoRA adapters
     std::unordered_set<llama_adapter_lora *> loras;
 

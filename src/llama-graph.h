@@ -3,6 +3,8 @@
 #include "llama-arch.h"
 #include "llama-batch.h"
 #include "llama-hparams.h"
+
+#include <unordered_map>
 #include "llama-adapter.h"
 
 #include <cstdint>
@@ -787,6 +789,10 @@ struct llm_graph_params {
     const llama_memory_context_i * mctx;
     const llama_cross            * cross;
 
+    // NVFP4 calibrated activation scales, keyed by weight (ROADMAP-NVFP4 1g-3). Owned by
+    // llama_model; may be null or empty for any model without them.
+    const std::unordered_map<const ggml_tensor *, ggml_tensor *> * nvfp4_act_scales;
+
     std::map<llama_seq_id, llama_sampler *> samplers;
 
     static bool samplers_equal(
@@ -1026,6 +1032,9 @@ struct llm_graph_context {
     const llama_adapter_loras    * loras;
     const llama_memory_context_i * mctx;
     const llama_cross            * cross;
+
+    // See llm_graph_params. Consulted by build_lora_mm when a call site passes no explicit scale.
+    const std::unordered_map<const ggml_tensor *, ggml_tensor *> * nvfp4_act_scales = nullptr;
 
     std::map<llama_seq_id, llama_sampler *> samplers;
 

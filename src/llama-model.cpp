@@ -1701,6 +1701,46 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
         }
     }
 
+    // Build the NVFP4 weight -> calibrated activation-scale map (ROADMAP-NVFP4 1g-3).
+    // Derived from names so it covers every role whose sidecar exists, present and future.
+    {
+        std::unordered_map<std::string, ggml_tensor *> by_name;
+        by_name.reserve(tensors_by_name.size());
+        for (auto & [nm, t] : tensors_by_name) {
+            by_name.emplace(nm, t);
+        }
+        const std::string suffix = ".input_scale";
+        size_t n_matched = 0, n_orphan = 0, n_skipped_type = 0;
+        for (auto & [nm, t] : tensors_by_name) {
+            if (nm.size() <= suffix.size() || nm.compare(nm.size() - suffix.size(), suffix.size(), suffix) != 0) {
+                continue;
+            }
+            const std::string w_name = nm.substr(0, nm.size() - suffix.size()) + ".weight";
+            auto it = by_name.find(w_name);
+            if (it == by_name.end()) {
+                // A sidecar whose weight we cannot name. Counted, not silently dropped: it means
+                // the naming rule and the checkpoint disagree, which is worth seeing.
+                n_orphan++;
+                continue;
+            }
+            if (it->second->type != GGML_TYPE_NVFP4) {
+                // The scale is meaningful only on the native FP4 path. Attaching it elsewhere is
+                // numerically harmless -- and that is exactly why it went unnoticed once before
+                // (ROADMAP P5): it inflates the carrier DETECTOR with matmuls the kernel never
+                // consults, making a genuine carrier loss look like normal slack.
+                n_skipped_type++;
+                continue;
+            }
+            nvfp4_act_scales.emplace(it->second, t);
+            n_matched++;
+        }
+        if (n_matched || n_orphan || n_skipped_type) {
+            LLAMA_LOG_INFO("%s: NVFP4 activation scales: %zu mapped to NVFP4 weights"
+                           ", %zu skipped (weight not NVFP4), %zu orphaned (no matching .weight)"
+                           "\n", __func__, n_matched, n_skipped_type, n_orphan);
+        }
+    }
+
     ml.init_mappings(true, use_mlock ? &pimpl->mlock_mmaps : nullptr);
     pimpl->mappings.reserve(ml.mappings.size());
 

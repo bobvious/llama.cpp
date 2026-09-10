@@ -1492,6 +1492,7 @@ llm_graph_context::llm_graph_context(const llm_graph_params & params) :
     loras            (params.loras),
     mctx             (params.mctx),
     cross            (params.cross),
+    nvfp4_act_scales (params.nvfp4_act_scales),
     samplers         (params.samplers),
     cb_func          (params.cb),
     res              (params.res),
@@ -1541,6 +1542,26 @@ ggml_tensor * llm_graph_context::build_lora_mm(
     // the kernel will never consult makes a genuine carrier loss look like normal slack.
     // Found by the Glimmer review lane 2026-09-09 (ROADMAP P5) and verified: there was no type
     // check at all.
+    // ROADMAP-NVFP4 1g-3: FALL BACK to the model's weight->scale map when the call site did not
+    // pass a scale. Only attention sites pass one explicitly, which left 156 FFN matmuls
+    // uncalibrated -- and "does PARTIAL calibration work" is a different question from the one
+    // 1g-4 asks. build_ffn takes BARE tensors, so the alternative was adding three parameters to
+    // build_ffn and touching every architecture's call site, where a missed site fails SILENTLY:
+    // an uncalibrated matmul is indistinguishable from a calibrated one in the output.
+    //
+    // An explicit argument always WINS. The map is a fallback, never an override, so an existing
+    // call site cannot have its behaviour changed underneath it by a name-matching rule.
+    //
+    // ⚠ MoE IS NOT COVERED BY THIS. Expert matmuls go through build_lora_mm_id, a different
+    // function, and the sorted-expert path memsets dst_slice and drops src[3] regardless
+    // (ROADMAP 1c). Do not read a rising attach count as MoE coverage.
+    if (!w_in_s && w && w->type == GGML_TYPE_NVFP4 && nvfp4_act_scales) {
+        auto it = nvfp4_act_scales->find(w);
+        if (it != nvfp4_act_scales->end()) {
+            w_in_s = it->second;
+        }
+    }
+
     if (w_in_s && w && w->type == GGML_TYPE_NVFP4) {
         res->src[3] = w_in_s;
 
