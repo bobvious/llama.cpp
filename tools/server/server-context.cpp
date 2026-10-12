@@ -3773,10 +3773,13 @@ private:
                             }
 
                             {
-                                // erase any checkpoints with pos_max > pos_next
+                                // erase any checkpoints whose kept range reaches pos_next
+                                // fork: use the same keep-end as the restore above (max(pos_min + 1, pos_max)); plain
+                                // pos_max > pos_next let a single-position checkpoint (pos_min == pos_max == pos_next,
+                                // e.g. pos 0 after a reset) survive and be restored under a different prefix
                                 for (auto it = slot.prompt.checkpoints.begin(); it != slot.prompt.checkpoints.end();) {
                                     const auto & cur = *it;
-                                    if (cur.pos_max > pos_next) {
+                                    if (std::max(cur.pos_min + 1, cur.pos_max) > pos_next) {
                                         SLT_TRC(slot, "erased invalidated context checkpoint (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", n_swa = %d, pos_next = %d, size = %.3f MiB)\n", cur.pos_min, cur.pos_max, cur.n_tokens, n_swa, pos_next, (float) cur.size() / 1024 / 1024);
                                         it = slot.prompt.checkpoints.erase(it);
                                     } else {
