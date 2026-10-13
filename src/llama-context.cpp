@@ -712,6 +712,24 @@ void llama_context::sched_new(size_t max_nodes, bool parallel) {
     ggml_backend_sched_set_realloc_callback(sched.get(), sched_graph_realloc, this);
 }
 
+// fork: worst-case token count to reserve the DRAFTING graph at for a DFlash/DSpark draft context (see sched_reserve).
+// Any other model: n_tokens unchanged. Block size from the same "dflash.block_size" key common/speculative reads,
+// defaulting to 16 there too; +1 covers the anchor token.
+static uint32_t llama_dflash_reserve_tokens(const llama_model & model, uint32_t n_tokens, uint32_t n_seqs) {
+    if (model.arch != LLM_ARCH_DFLASH) {
+        return n_tokens;
+    }
+    uint32_t block_size = 16;
+    const auto it = model.gguf_kv.find("dflash.block_size");
+    if (it != model.gguf_kv.end()) {
+        const int v = std::atoi(it->second.c_str());
+        if (v > 0) {
+            block_size = (uint32_t) v;
+        }
+    }
+    return std::min(n_tokens, (block_size + 1) * std::max<uint32_t>(n_seqs, 1));
+}
+
 void llama_context::sched_reserve() {
     if (!sched_need_reserve) {
         return;
@@ -769,16 +787,26 @@ void llama_context::sched_reserve() {
 
     const uint32_t n_outputs_pp = std::min(n_tokens, cparams.n_outputs_max);
 
+    // fork: a DFlash/DSpark draft never runs its token (drafting) graph on more than one block per
+    // sequence -- common/speculative feeds [anchor, <mask> * (block_size-1)] and clamps n_max to the
+    // trained block -- while its n_ubatch-sized decodes are embd (KV-injection) batches that return
+    // before the lm_head. Reserving the token graph at n_ubatch therefore sized the compute buffer for
+    // n_ubatch full-vocab logit rows: 3,910 MiB at ub2048 / 1,955 at ub1024 on MiniCPM-V 4.7 DSpark
+    // (vocab 248144), against ~16 rows ever used. Reserve the drafting graph at (block_size+1) per
+    // sequence instead; the embd path is far smaller and is allocated on first use like any graph.
+    const uint32_t n_tokens_rsv = llama_dflash_reserve_tokens(model, n_tokens, n_seqs);
+    const uint32_t n_outputs_rsv = std::min(n_tokens_rsv, n_outputs_pp);
+
     // reserve pp (prompt processing) graph first so that buffers are only allocated once
     {
-        auto * gf = graph_reserve(n_tokens, n_seqs, n_outputs_pp, mctx.get(),
+        auto * gf = graph_reserve(n_tokens_rsv, n_seqs, n_outputs_rsv, mctx.get(),
                 model.hparams.no_alloc, model.hparams.no_alloc ? backend_buf_exp_size.data() : nullptr);
         if (!gf) {
             if (cparams.pipeline_parallel) {
                 LLAMA_LOG_WARN("%s: compute buffer allocation failed, retrying without pipeline parallelism\n", __func__);
                 cparams.pipeline_parallel = false;
                 sched_new(max_nodes, false);
-                gf = graph_reserve(n_tokens, n_seqs, n_outputs_pp, mctx.get());
+                gf = graph_reserve(n_tokens_rsv, n_seqs, n_outputs_rsv, mctx.get());
             }
             if (!gf) {
                 throw std::runtime_error("failed to allocate compute pp buffers");
@@ -822,7 +850,7 @@ void llama_context::sched_reserve() {
                 gf = graph_reserve(n_tokens, 1,      n_outputs_pp, mctx.get(), model.hparams.no_alloc);
                 break;
             default:
-                gf = graph_reserve(n_tokens, n_seqs, n_outputs_pp, mctx.get(), model.hparams.no_alloc);
+                gf = graph_reserve(n_tokens_rsv, n_seqs, n_outputs_rsv, mctx.get(), model.hparams.no_alloc);
         };
 
         if (!gf) {
@@ -993,9 +1021,10 @@ bool llama_context::memory_update(bool optimize) {
         const uint32_t n_seqs = cparams.n_seq_max;
         const uint32_t n_tokens = std::min(cparams.n_ctx, cparams.n_ubatch);
 
-        const uint32_t n_outputs_max = std::min(n_tokens, cparams.n_outputs_max);
+        const uint32_t n_tokens_rsv  = llama_dflash_reserve_tokens(model, n_tokens, n_seqs); // fork: see sched_reserve
+        const uint32_t n_outputs_max = std::min(n_tokens_rsv, cparams.n_outputs_max);
 
-        auto * gf = graph_reserve(n_tokens, n_seqs, n_outputs_max, mctx.get());
+        auto * gf = graph_reserve(n_tokens_rsv, n_seqs, n_outputs_max, mctx.get());
         if (!gf) {
             LLAMA_LOG_ERROR("%s: failed to reserve graph after the memory update\n", __func__);
         }
